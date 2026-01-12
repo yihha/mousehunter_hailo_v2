@@ -1,0 +1,41 @@
+[Unit]
+Description=MouseHunter Cat Prey Detection & Interdiction System
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/mousehunter_hailo_v2
+Environment=PATH=/home/pi/mousehunter_hailo_v2/.venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+
+# Load environment variables from .env file if present
+EnvironmentFile=-/home/pi/mousehunter_hailo_v2/.env
+
+# Main command
+ExecStart=/home/pi/mousehunter_hailo_v2/.venv/bin/python -m mousehunter.main
+
+# Restart policy
+Restart=always
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mousehunter
+
+# Security hardening
+NoNewPrivileges=false
+ProtectSystem=false
+PrivateTmp=false
+
+# GPIO access requires these to be false or specific permissions
+ProtectKernelTunables=false
+ProtectControlGroups=false
+
+# Allow camera and GPIO access
+SupplementaryGroups=video gpio i2c spi
+
+[Install]
+WantedBy=multi-user.target

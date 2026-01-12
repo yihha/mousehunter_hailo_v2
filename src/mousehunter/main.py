@@ -1,0 +1,516 @@
+"""
+MouseHunter Main Controller
+
+The central orchestrator implementing the state machine:
+IDLE -> VERIFYING -> LOCKDOWN -> COOLDOWN -> IDLE
+
+Coordinates:
+- Camera capture and circular buffer
+- Hailo-8L inference
+- Prey detection with debouncing
+- Jammer activation
+- Audio deterrent
+- Telegram notifications
+- REST API server
+"""
+
+import asyncio
+import logging
+import signal
+import sys
+import threading
+from datetime import datetime
+from enum import Enum, auto
+from typing import Callable
+
+import numpy as np
+
+logger = logging.getLogger(__name__)
+
+
+class SystemState(Enum):
+    """Main system state machine states."""
+
+    IDLE = auto()  # Normal monitoring
+    VERIFYING = auto()  # Potential prey, verifying
+    LOCKDOWN = auto()  # Prey confirmed, jammer active
+    COOLDOWN = auto()  # Post-lockdown cooldown
+
+
+class MouseHunterController:
+    """
+    Main controller orchestrating all system components.
+
+    Implements the Detect-and-Deny logic loop with state machine
+    for reliable prey detection and interdiction.
+    """
+
+    def __init__(self):
+        """Initialize the controller."""
+        self._state = SystemState.IDLE
+        self._running = False
+        self._main_loop: asyncio.AbstractEventLoop | None = None
+
+        # Component instances (initialized in start())
+        self._jammer = None
+        self._audio = None
+        self._camera = None
+        self._detector = None
+        self._telegram = None
+
+        # Detection thread
+        self._detection_thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+
+        # State tracking
+        self._last_state_change = datetime.now()
+        self._lockdown_start: datetime | None = None
+        self._cooldown_start: datetime | None = None
+        self._detection_count = 0
+        self._lockdown_count = 0
+
+        # Callbacks
+        self._on_state_change_callbacks: list[Callable[[SystemState], None]] = []
+
+        logger.info("MouseHunterController initialized")
+
+    @property
+    def state(self) -> SystemState:
+        """Get current system state."""
+        return self._state
+
+    async def start(self) -> None:
+        """Start the MouseHunter system."""
+        logger.info("=== Starting MouseHunter System ===")
+
+        # Store main event loop for cross-thread communication
+        self._main_loop = asyncio.get_running_loop()
+
+        # Import and set global loop reference for Telegram
+        from mousehunter.notifications import telegram_bot
+        telegram_bot.MAIN_LOOP = self._main_loop
+
+        # Load configuration
+        from mousehunter.config import (
+            setup_logging,
+            ensure_runtime_dirs,
+            telegram_config,
+            api_config,
+            jammer_config,
+        )
+
+        setup_logging()
+        ensure_runtime_dirs()
+
+        # Initialize components
+        await self._init_components()
+
+        # Register signal handlers
+        self._setup_signal_handlers()
+
+        self._running = True
+        logger.info("System initialization complete")
+
+        # Start background tasks
+        tasks = []
+
+        # Start Telegram bot if enabled
+        if telegram_config.enabled and self._telegram:
+            tasks.append(asyncio.create_task(self._telegram.start()))
+            logger.info("Telegram bot task started")
+
+        # Start API server if enabled
+        if api_config.enabled:
+            from mousehunter.api.server import start_server, set_components
+
+            set_components(
+                jammer=self._jammer,
+                audio=self._audio,
+                camera=self._camera,
+                detector=self._detector,
+            )
+            tasks.append(
+                asyncio.create_task(
+                    start_server(
+                        host=api_config.host,
+                        port=api_config.port,
+                        jammer=self._jammer,
+                        audio=self._audio,
+                        camera=self._camera,
+                        detector=self._detector,
+                    )
+                )
+            )
+            logger.info(f"API server task started on {api_config.host}:{api_config.port}")
+
+        # Start detection pipeline in background thread
+        self._start_detection_thread()
+
+        # Send startup notification
+        if self._telegram:
+            try:
+                await self._telegram.send_message(
+                    "MouseHunter Online\n"
+                    f"State: {self._state.name}\n"
+                    f"Jammer: GPIO {jammer_config.gpio_pin}\n"
+                    "Prey detection active."
+                )
+            except Exception as e:
+                logger.error(f"Failed to send startup notification: {e}")
+
+        logger.info("=== MouseHunter System Running ===")
+
+        # Main loop - wait for shutdown
+        try:
+            while self._running:
+                await asyncio.sleep(1)
+                await self._state_machine_tick()
+        except asyncio.CancelledError:
+            logger.info("Main loop cancelled")
+
+        # Cleanup
+        await self._shutdown()
+
+    async def _init_components(self) -> None:
+        """Initialize all hardware and software components."""
+        logger.info("Initializing components...")
+
+        # Hardware: Jammer
+        try:
+            from mousehunter.hardware.jammer import Jammer
+            from mousehunter.config import jammer_config
+
+            self._jammer = Jammer(
+                pin=jammer_config.gpio_pin,
+                active_high=jammer_config.active_high,
+                max_on_duration=jammer_config.lockdown_duration_seconds,
+            )
+            logger.info("Jammer initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize jammer: {e}")
+
+        # Hardware: Audio
+        try:
+            from mousehunter.hardware.audio import AudioDeterrent
+            from mousehunter.config import audio_config, PROJECT_ROOT
+            from pathlib import Path
+
+            sound_path = Path(audio_config.sound_file)
+            if not sound_path.is_absolute():
+                sound_path = PROJECT_ROOT / sound_path
+
+            self._audio = AudioDeterrent(
+                sound_file=sound_path if sound_path.exists() else None,
+                volume=audio_config.volume,
+                enabled=audio_config.enabled,
+            )
+            logger.info("Audio deterrent initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize audio: {e}")
+
+        # Camera
+        try:
+            from mousehunter.camera.camera_service import CameraService
+            from mousehunter.config import camera_config, recording_config
+
+            self._camera = CameraService(
+                main_resolution=camera_config.main_resolution,
+                inference_resolution=camera_config.inference_resolution,
+                framerate=camera_config.framerate,
+                buffer_seconds=camera_config.buffer_seconds,
+                vflip=camera_config.vflip,
+                hflip=camera_config.hflip,
+                output_dir=recording_config.output_dir,
+            )
+            logger.info("Camera service initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize camera: {e}")
+
+        # Inference / Prey Detector
+        try:
+            from mousehunter.inference.prey_detector import PreyDetector
+            from mousehunter.config import inference_config
+
+            self._detector = PreyDetector(
+                consecutive_frames_required=inference_config.consecutive_frames_required,
+                confidence_threshold=inference_config.confidence_threshold,
+            )
+
+            # Register prey detection callback
+            self._detector.on_prey_confirmed(self._handle_prey_confirmed)
+            logger.info("Prey detector initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize detector: {e}")
+
+        # Telegram Bot
+        try:
+            from mousehunter.notifications.telegram_bot import TelegramBot
+            from mousehunter.config import telegram_config
+
+            if telegram_config.enabled:
+                self._telegram = TelegramBot(
+                    bot_token=telegram_config.bot_token,
+                    chat_id=telegram_config.chat_id,
+                    enabled=telegram_config.enabled,
+                )
+                self._telegram.set_components(
+                    jammer=self._jammer,
+                    audio=self._audio,
+                    camera=self._camera,
+                )
+                logger.info("Telegram bot initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize Telegram: {e}")
+
+    def _setup_signal_handlers(self) -> None:
+        """Setup signal handlers for graceful shutdown."""
+
+        def signal_handler(signum, frame):
+            logger.info(f"Signal {signum} received, initiating shutdown...")
+            self._running = False
+
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+
+    def _start_detection_thread(self) -> None:
+        """Start the detection pipeline in a background thread."""
+        if self._camera is None or self._detector is None:
+            logger.error("Cannot start detection: camera or detector not available")
+            return
+
+        self._stop_event.clear()
+        self._detection_thread = threading.Thread(
+            target=self._detection_loop,
+            name="DetectionThread",
+            daemon=True,
+        )
+        self._detection_thread.start()
+        logger.info("Detection thread started")
+
+    def _detection_loop(self) -> None:
+        """
+        Main detection loop (runs in background thread).
+
+        Captures frames and runs inference continuously.
+        """
+        logger.info("Detection loop starting")
+
+        # Start camera
+        self._camera.start()
+
+        frame_count = 0
+        while not self._stop_event.is_set():
+            try:
+                # Get frame from camera
+                frame, timestamp = self._camera.get_inference_frame()
+
+                if frame is None:
+                    continue
+
+                # Process through prey detector
+                result = self._detector.process_frame(frame, timestamp)
+                frame_count += 1
+
+                # Log periodically
+                if frame_count % 100 == 0:
+                    logger.debug(
+                        f"Detection loop: {frame_count} frames, "
+                        f"state={self._state.name}, "
+                        f"avg_inference={self._detector.engine.average_inference_time:.1f}ms"
+                    )
+
+            except Exception as e:
+                logger.error(f"Detection loop error: {e}", exc_info=True)
+
+        self._camera.stop()
+        logger.info("Detection loop stopped")
+
+    def _handle_prey_confirmed(self, event) -> None:
+        """
+        Handle prey confirmation from detector (called from detection thread).
+
+        Transitions to LOCKDOWN state and triggers all interdiction actions.
+        """
+        logger.warning(f"PREY DETECTED! Confidence: {event.confidence:.2f}")
+
+        self._detection_count += 1
+
+        # Capture evidence image
+        image_bytes = None
+        if event.frame is not None:
+            try:
+                from PIL import Image
+                from io import BytesIO
+
+                img = Image.fromarray(event.frame)
+                buffer = BytesIO()
+                img.save(buffer, "JPEG", quality=85)
+                image_bytes = buffer.getvalue()
+            except Exception as e:
+                logger.error(f"Failed to encode evidence image: {e}")
+
+        # Save evidence to disk
+        if self._camera:
+            try:
+                evidence_path = self._camera.trigger_evidence_save(
+                    f"prey_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                )
+                logger.info(f"Evidence saved to: {evidence_path}")
+            except Exception as e:
+                logger.error(f"Failed to save evidence: {e}")
+
+        # Schedule async actions on main loop
+        if self._main_loop:
+            asyncio.run_coroutine_threadsafe(
+                self._execute_lockdown(image_bytes), self._main_loop
+            )
+
+    async def _execute_lockdown(self, image_bytes: bytes | None = None) -> None:
+        """Execute lockdown sequence (async)."""
+        from mousehunter.config import jammer_config
+
+        # Transition to LOCKDOWN
+        self._transition_to(SystemState.LOCKDOWN)
+        self._lockdown_start = datetime.now()
+        self._lockdown_count += 1
+
+        # 1. IMMEDIATE: Activate jammer
+        if self._jammer:
+            await self._jammer.activate_with_auto_off(jammer_config.lockdown_duration_seconds)
+            logger.info("Jammer ACTIVATED - Cat flap BLOCKED")
+
+        # 2. Trigger audio deterrent
+        if self._audio:
+            self._audio.play()
+            logger.info("Audio deterrent triggered")
+
+        # 3. Send Telegram notification
+        if self._telegram:
+            try:
+                message = (
+                    "PREY DETECTED!\n"
+                    f"Cat flap locked for {jammer_config.lockdown_duration_seconds}s.\n"
+                    f"Detection #{self._detection_count}"
+                )
+                await self._telegram.send_alert(message, image_bytes, include_buttons=True)
+            except Exception as e:
+                logger.error(f"Failed to send alert: {e}")
+
+    async def _state_machine_tick(self) -> None:
+        """Periodic state machine update."""
+        from mousehunter.config import jammer_config
+
+        if self._state == SystemState.LOCKDOWN:
+            # Check if lockdown duration has elapsed
+            if self._lockdown_start and self._jammer:
+                if not self._jammer.is_active:
+                    # Jammer auto-deactivated, transition to cooldown
+                    logger.info("Lockdown complete, entering cooldown")
+                    self._transition_to(SystemState.COOLDOWN)
+                    self._cooldown_start = datetime.now()
+
+        elif self._state == SystemState.COOLDOWN:
+            # Check if cooldown has elapsed
+            if self._cooldown_start:
+                elapsed = (datetime.now() - self._cooldown_start).total_seconds()
+                if elapsed >= jammer_config.cooldown_duration_seconds:
+                    logger.info("Cooldown complete, returning to IDLE")
+                    self._transition_to(SystemState.IDLE)
+                    self._detector.reset()
+
+        elif self._state == SystemState.VERIFYING:
+            # Detector handles this internally
+            pass
+
+    def _transition_to(self, new_state: SystemState) -> None:
+        """Transition to a new state."""
+        old_state = self._state
+        self._state = new_state
+        self._last_state_change = datetime.now()
+
+        logger.info(f"State: {old_state.name} -> {new_state.name}")
+
+        for callback in self._on_state_change_callbacks:
+            try:
+                callback(new_state)
+            except Exception as e:
+                logger.error(f"State change callback error: {e}")
+
+    async def _shutdown(self) -> None:
+        """Clean shutdown of all components."""
+        logger.info("Initiating shutdown...")
+
+        # Stop detection thread
+        self._stop_event.set()
+        if self._detection_thread:
+            self._detection_thread.join(timeout=5.0)
+
+        # Deactivate jammer (safety)
+        if self._jammer:
+            self._jammer.deactivate("Shutdown")
+            self._jammer.cleanup()
+
+        # Stop audio
+        if self._audio:
+            self._audio.cleanup()
+
+        # Stop camera
+        if self._camera:
+            self._camera.cleanup()
+
+        # Stop Telegram
+        if self._telegram:
+            await self._telegram.stop()
+
+        # Cleanup detector
+        if self._detector:
+            self._detector.cleanup()
+
+        logger.info("Shutdown complete")
+
+    def on_state_change(self, callback: Callable[[SystemState], None]) -> None:
+        """Register callback for state changes."""
+        self._on_state_change_callbacks.append(callback)
+
+    def get_status(self) -> dict:
+        """Get full system status."""
+        return {
+            "state": self._state.name,
+            "running": self._running,
+            "last_state_change": self._last_state_change.isoformat(),
+            "detection_count": self._detection_count,
+            "lockdown_count": self._lockdown_count,
+            "jammer": self._jammer.get_status() if self._jammer else None,
+            "audio": self._audio.get_status() if self._audio else None,
+            "camera": self._camera.get_status() if self._camera else None,
+            "detector": self._detector.get_status() if self._detector else None,
+        }
+
+
+# ==================== Entry Point ====================
+
+
+async def app() -> None:
+    """Main application entry point."""
+    controller = MouseHunterController()
+    await controller.start()
+
+
+def main() -> None:
+    """CLI entry point."""
+    print("=== MouseHunter v2.0 ===")
+    print("Cat Prey Detection & Interdiction System")
+    print("Raspberry Pi 5 + Hailo-8L")
+    print()
+
+    try:
+        asyncio.run(app())
+    except KeyboardInterrupt:
+        print("\nShutdown requested by user")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}", exc_info=True)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

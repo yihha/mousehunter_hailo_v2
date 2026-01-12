@@ -1,0 +1,91 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mousehunter-hailo"
+version = "2.0.0"
+description = "Real-time Cat Prey Detection & Interdiction System for Raspberry Pi 5 + Hailo-8L"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+keywords = [
+    "catflap",
+    "prey-detection",
+    "hailo",
+    "raspberry-pi",
+    "yolov8",
+    "computer-vision",
+    "home-automation",
+    "pet-tech"
+]
+authors = [
+    {name = "MouseHunter Team"}
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Home Automation",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "picamera2>=0.3.19",
+    "hailo-platform>=4.18.0",
+    "python-telegram-bot[job-queue]>=21.0",
+    "gpiozero>=2.0",
+    "lgpio>=0.2.2.0",
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "tenacity>=8.2.0",
+    "numpy>=1.26.0",
+    "Pillow>=10.0.0",
+    "psutil>=5.9.0",
+    "pygame>=2.5.0",
+    "httpx>=0.26.0",
+    "aiohttp>=3.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.1.0",
+    "mypy>=1.8.0",
+]
+
+[project.scripts]
+mousehunter = "mousehunter.main:main"
+mousehunter-test-hardware = "mousehunter.hardware.jammer:test_jammer"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
