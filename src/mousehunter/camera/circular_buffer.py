@@ -169,18 +169,15 @@ class CircularVideoBuffer:
         self,
         event_name: str = "detection",
         pre_seconds: float | None = None,
-        post_seconds: float = 5.0,
     ) -> Path | None:
         """
         Trigger saving of the buffer to disk.
 
-        Saves frames from (now - pre_seconds) to (now + post_seconds).
-        Pre-event frames come from buffer, post-event frames are captured live.
+        Saves buffered frames from (now - pre_seconds) to now.
 
         Args:
             event_name: Name for the saved file
             pre_seconds: Seconds before trigger to include (default: all buffered)
-            post_seconds: Seconds after trigger to continue recording
 
         Returns:
             Path to saved directory, or None if failed

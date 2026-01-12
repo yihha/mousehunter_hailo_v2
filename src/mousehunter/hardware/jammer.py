@@ -125,15 +125,22 @@ class Jammer:
         elapsed = (datetime.now() - self._activation_time).total_seconds()
         return max(0.0, self.max_on_duration - elapsed)
 
-    def activate(self) -> bool:
+    def activate(self, refresh_timer: bool = False) -> bool:
         """
         Activate the jammer (block cat flap).
+
+        Args:
+            refresh_timer: If True, reset the activation time if already active.
 
         Returns:
             True if activation was successful, False if already active
         """
         with self._lock:
             if self._is_active:
+                if refresh_timer:
+                    self._activation_time = datetime.now()
+                    logger.info("Jammer timer refreshed")
+                    return True
                 remaining = self.time_remaining
                 logger.info(f"Jammer already active ({remaining:.1f}s remaining)")
                 return False
@@ -199,7 +206,7 @@ class Jammer:
         Returns:
             True if activation was successful
         """
-        if not self.activate():
+        if not self.activate(refresh_timer=True):
             return False
 
         duration = duration or self.max_on_duration
