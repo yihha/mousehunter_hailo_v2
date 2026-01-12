@@ -13,7 +13,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
@@ -184,10 +184,10 @@ class CircularVideoBuffer:
         """
         self._trigger_time = datetime.now()
         pre_seconds = pre_seconds or self.buffer_seconds
+        since = self._trigger_time - timedelta(seconds=pre_seconds)
 
         # Get pre-event frames
-        cutoff = datetime.now()
-        pre_frames = self.get_frames(since=None)  # Get all for now
+        pre_frames = self.get_frames(since=since)
 
         if not pre_frames:
             logger.warning("No frames in buffer to save")
