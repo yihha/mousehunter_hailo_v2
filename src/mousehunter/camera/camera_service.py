@@ -241,9 +241,15 @@ class CameraService:
             try:
                 timestamp = datetime.now()
 
-                # Capture both streams
-                main_frame = self._camera.capture_array("main")
-                inference_frame = self._camera.capture_array("lores")
+                # Capture both streams (synchronized if using Picamera2)
+                if PICAMERA_AVAILABLE:
+                    request = self._camera.capture_request()
+                    main_frame = request.make_array("main")
+                    inference_frame = request.make_array("lores")
+                else:
+                    # Mock capture
+                    main_frame = self._camera.capture_array("main")
+                    inference_frame = self._camera.capture_array("lores")
 
                 with self._frame_lock:
                     self._latest_main_frame = main_frame
