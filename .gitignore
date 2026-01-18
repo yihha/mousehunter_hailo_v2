@@ -69,3 +69,7 @@ htmlcov/
 .claude/
 tmpclaude-*
 
+# local testing
+stream_hailo_mjpeg.py
+verify_full_stack.py
+
