@@ -233,8 +233,11 @@ class MouseHunterController:
             from mousehunter.config import inference_config
 
             self._detector = PreyDetector(
-                consecutive_frames_required=inference_config.consecutive_frames_required,
-                confidence_threshold=inference_config.confidence_threshold,
+                thresholds=inference_config.thresholds,
+                window_size=inference_config.window_size,
+                trigger_count=inference_config.trigger_count,
+                spatial_validation_enabled=inference_config.spatial_validation_enabled,
+                box_expansion=inference_config.box_expansion,
             )
 
             # Register prey detection callback
