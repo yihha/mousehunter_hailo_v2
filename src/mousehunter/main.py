@@ -50,6 +50,7 @@ class MouseHunterController:
         self._state = SystemState.IDLE
         self._running = False
         self._main_loop: asyncio.AbstractEventLoop | None = None
+        self._loop_ready = threading.Event()  # Signals when main loop is ready
 
         # Component instances (initialized in start())
         self._jammer = None
@@ -90,6 +91,9 @@ class MouseHunterController:
         # Import and set global loop reference for Telegram
         from mousehunter.notifications import telegram_bot
         telegram_bot.MAIN_LOOP = self._main_loop
+
+        # Signal that main loop is ready for cross-thread communication
+        self._loop_ready.set()
 
         # Load configuration
         from mousehunter.config import (
@@ -370,10 +374,27 @@ class MouseHunterController:
                 logger.error(f"Failed to save evidence: {e}")
 
         # Schedule async actions on main loop
+        # Wait for main loop to be ready (with timeout to avoid deadlock)
+        if not self._loop_ready.wait(timeout=5.0):
+            logger.error("Main loop not ready after 5s, cannot execute lockdown")
+            return
+
         if self._main_loop:
-            asyncio.run_coroutine_threadsafe(
-                self._execute_lockdown(image_bytes), self._main_loop
-            )
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    self._execute_lockdown(image_bytes), self._main_loop
+                )
+                # Don't block waiting for result, but log any errors
+                future.add_done_callback(self._lockdown_callback)
+            except Exception as e:
+                logger.error(f"Failed to schedule lockdown: {e}", exc_info=True)
+
+    def _lockdown_callback(self, future) -> None:
+        """Callback to log lockdown execution errors."""
+        try:
+            future.result()  # Raises if coroutine raised
+        except Exception as e:
+            logger.error(f"Lockdown execution failed: {e}", exc_info=True)
 
     async def _execute_lockdown(self, image_bytes: bytes | None = None) -> None:
         """Execute lockdown sequence (async)."""
@@ -456,10 +477,16 @@ class MouseHunterController:
         """Clean shutdown of all components."""
         logger.info("Initiating shutdown...")
 
-        # Stop detection thread
+        # Stop detection thread first (before cleanup to avoid race conditions)
         self._stop_event.set()
         if self._detection_thread:
-            self._detection_thread.join(timeout=5.0)
+            logger.info("Waiting for detection thread to stop...")
+            self._detection_thread.join(timeout=15.0)
+            if self._detection_thread.is_alive():
+                logger.error(
+                    "Detection thread did not stop within 15s! "
+                    "Proceeding with cleanup anyway (may cause errors)"
+                )
 
         # Deactivate jammer (safety)
         if self._jammer:

@@ -334,9 +334,13 @@ class TestCallbacks:
             states.append(state)
 
         prey_detector.on_state_change(callback)
-        prey_detector._transition_to(DetectionState.VERIFYING)
 
-        assert DetectionState.VERIFYING in states
+        # Manually set state to VERIFYING, then reset() will transition to IDLE
+        # and invoke the callback properly (callbacks are invoked outside the lock)
+        prey_detector._state = DetectionState.VERIFYING
+        prey_detector.reset()
+
+        assert DetectionState.IDLE in states
 
 
 class TestGetStatus:

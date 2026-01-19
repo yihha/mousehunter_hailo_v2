@@ -298,6 +298,9 @@ class PreyDetector:
 
     def _update_state(self, frame_result: FrameResult, frame: np.ndarray) -> None:
         """Update detection state based on frame result and rolling window."""
+        # Collect callbacks to invoke outside the lock (prevents deadlock)
+        pending_callbacks: list[tuple[Callable, tuple]] = []
+
         with self._lock:
             # Add result to rolling window
             self._detection_window.append(frame_result.has_valid_prey)
@@ -319,36 +322,64 @@ class PreyDetector:
             if positive_count >= self.trigger_count:
                 # Enough evidence - confirm prey
                 if self._state != DetectionState.CONFIRMED:
-                    self._confirm_prey(frame, positive_count)
+                    # Prepare prey confirmation (callbacks invoked after lock release)
+                    event = self._prepare_prey_confirmation(frame, positive_count)
+                    if event:
+                        pending_callbacks.extend(
+                            [(cb, (event,)) for cb in self._on_prey_confirmed_callbacks]
+                        )
             elif positive_count > 0:
                 # Some evidence - verifying
                 if self._state == DetectionState.IDLE:
-                    self._transition_to(DetectionState.VERIFYING)
+                    self._state = DetectionState.VERIFYING
+                    logger.info(f"State transition: IDLE -> VERIFYING")
+                    pending_callbacks.extend(
+                        [(cb, (DetectionState.VERIFYING,)) for cb in self._on_state_change_callbacks]
+                    )
             else:
                 # No evidence - idle
                 if self._state == DetectionState.VERIFYING:
-                    self._transition_to(DetectionState.IDLE)
+                    self._state = DetectionState.IDLE
                     self._last_match = None
+                    logger.info(f"State transition: VERIFYING -> IDLE")
+                    pending_callbacks.extend(
+                        [(cb, (DetectionState.IDLE,)) for cb in self._on_state_change_callbacks]
+                    )
 
-    def _transition_to(self, new_state: DetectionState) -> None:
-        """Transition to a new state."""
+        # Invoke callbacks OUTSIDE the lock to prevent deadlock
+        for callback, args in pending_callbacks:
+            try:
+                callback(*args)
+            except Exception as e:
+                logger.error(f"Callback error: {e}")
+
+    def _transition_to(self, new_state: DetectionState) -> list[tuple[Callable, tuple]]:
+        """
+        Transition to a new state.
+
+        Returns list of (callback, args) tuples to be invoked OUTSIDE the lock.
+        """
         old_state = self._state
         self._state = new_state
         logger.info(f"State transition: {old_state.name} -> {new_state.name}")
 
-        for callback in self._on_state_change_callbacks:
-            try:
-                callback(new_state)
-            except Exception as e:
-                logger.error(f"State change callback error: {e}")
+        # Return callbacks to be invoked outside the lock
+        return [(cb, (new_state,)) for cb in self._on_state_change_callbacks]
 
-    def _confirm_prey(self, frame: np.ndarray, positive_count: int) -> None:
-        """Confirm prey detection and trigger callbacks."""
-        self._transition_to(DetectionState.CONFIRMED)
+    def _prepare_prey_confirmation(
+        self, frame: np.ndarray, positive_count: int
+    ) -> PreyDetectionEvent | None:
+        """
+        Prepare prey confirmation event (called while holding lock).
+
+        Returns the event to be passed to callbacks OUTSIDE the lock.
+        """
+        self._state = DetectionState.CONFIRMED
+        logger.info(f"State transition: {self._state.name} -> CONFIRMED")
 
         if self._last_match is None:
             logger.error("Prey confirmed but no match stored")
-            return
+            return None
 
         event = PreyDetectionEvent(
             timestamp=datetime.now(),
@@ -367,21 +398,30 @@ class PreyDetector:
             f"cat=({self._last_match.cat.confidence:.2f})"
         )
 
-        # Notify callbacks
-        for callback in self._on_prey_confirmed_callbacks:
-            try:
-                callback(event)
-            except Exception as e:
-                logger.error(f"Prey confirmed callback error: {e}")
+        return event
 
     def reset(self) -> None:
         """Reset detector to IDLE state."""
+        pending_callbacks: list[tuple[Callable, tuple]] = []
+
         with self._lock:
             self._detection_window.clear()
             self._last_match = None
             if self._state != DetectionState.IDLE:
-                self._transition_to(DetectionState.IDLE)
+                old_state = self._state
+                self._state = DetectionState.IDLE
+                logger.info(f"State transition: {old_state.name} -> IDLE (reset)")
+                pending_callbacks = [
+                    (cb, (DetectionState.IDLE,)) for cb in self._on_state_change_callbacks
+                ]
             logger.info("PreyDetector reset to IDLE")
+
+        # Invoke callbacks OUTSIDE the lock
+        for callback, args in pending_callbacks:
+            try:
+                callback(*args)
+            except Exception as e:
+                logger.error(f"Reset callback error: {e}")
 
     def on_prey_confirmed(self, callback: Callable[[PreyDetectionEvent], None]) -> None:
         """Register callback for when prey is confirmed."""

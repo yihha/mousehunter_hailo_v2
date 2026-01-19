@@ -13,6 +13,7 @@ The engine provides:
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -40,6 +41,9 @@ try:
 except ImportError:
     HAILO_AVAILABLE = False
     logger.warning("hailo_platform not available - running in simulation mode")
+
+# Inference timeout (seconds) - prevents system hang if Hailo freezes
+INFERENCE_TIMEOUT_SECONDS = 5.0
 
 
 class MockHailoInference:
@@ -179,6 +183,10 @@ class HailoEngine:
         self._initialized = False
         self._frame_count = 0
         self._total_inference_time = 0.0
+        self._timeout_count = 0  # Track inference timeouts
+
+        # Thread pool for timeout-protected inference
+        self._inference_executor: ThreadPoolExecutor | None = None
 
         # Callbacks for detection events
         self._detection_callbacks: list[Callable[[DetectionFrame], None]] = []
@@ -186,6 +194,8 @@ class HailoEngine:
         # Initialize engine
         if self._use_hailo:
             self._init_hailo()
+            # Create executor for timeout protection (single thread to serialize Hailo access)
+            self._inference_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hailo")
         else:
             self._mock_engine = MockHailoInference(str(model_path))
             self._initialized = True
@@ -292,23 +302,45 @@ class HailoEngine:
         return result
 
     def _run_hailo_inference(self, frame: np.ndarray) -> list[Detection]:
-        """Run inference on Hailo hardware."""
+        """Run inference on Hailo hardware with timeout protection."""
         # Preprocess frame
         input_data = self._preprocess(frame)
 
-        # Run inference - must activate network group first
-        with self._network_group.activate(self._network_group_params):
-            with InferVStreams(
-                self._network_group, self._input_params, self._output_params
-            ) as pipeline:
-                input_dict = {self._input_name: input_data}
-                output_dict = pipeline.infer(input_dict)
+        # Run inference with timeout to prevent system hang if Hailo freezes
+        try:
+            if self._inference_executor:
+                future = self._inference_executor.submit(
+                    self._execute_hailo_pipeline, input_data
+                )
+                output_dict = future.result(timeout=INFERENCE_TIMEOUT_SECONDS)
+            else:
+                # Fallback without timeout (shouldn't happen in normal operation)
+                output_dict = self._execute_hailo_pipeline(input_data)
+        except FuturesTimeoutError:
+            self._timeout_count += 1
+            logger.error(
+                f"Hailo inference timeout after {INFERENCE_TIMEOUT_SECONDS}s! "
+                f"(total timeouts: {self._timeout_count})"
+            )
+            return []  # Return empty detections on timeout
+        except Exception as e:
+            logger.error(f"Hailo inference error: {e}", exc_info=True)
+            return []
 
         # Post-process outputs
         raw_output = list(output_dict.values())[0]
         detections = self._postprocess_yolo(raw_output, frame.shape[:2])
 
         return detections
+
+    def _execute_hailo_pipeline(self, input_data: np.ndarray) -> dict:
+        """Execute the actual Hailo inference pipeline (called from thread pool)."""
+        with self._network_group.activate(self._network_group_params):
+            with InferVStreams(
+                self._network_group, self._input_params, self._output_params
+            ) as pipeline:
+                input_dict = {self._input_name: input_data}
+                return pipeline.infer(input_dict)
 
     def _preprocess(self, frame: np.ndarray) -> np.ndarray:
         """
@@ -462,11 +494,17 @@ class HailoEngine:
             "estimated_fps": self.fps,
             "hailo_available": HAILO_AVAILABLE,
             "using_hailo": self._use_hailo,
+            "timeout_count": self._timeout_count,
             "classes": self.classes,
         }
 
     def cleanup(self) -> None:
         """Release Hailo resources."""
+        # Shutdown thread pool executor first
+        if self._inference_executor:
+            self._inference_executor.shutdown(wait=True, cancel_futures=True)
+            self._inference_executor = None
+
         if self._use_hailo and self._initialized:
             try:
                 del self._network_group
