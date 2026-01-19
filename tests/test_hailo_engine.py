@@ -127,10 +127,11 @@ class TestHailoEngine:
         assert "average_inference_ms" in status
         assert "estimated_fps" in status
         assert "hailo_available" in status
+        assert "using_hailo" in status
         assert "classes" in status
 
         assert status["initialized"] is True
-        assert status["hailo_available"] is False  # Running in mock mode
+        assert status["using_hailo"] is False  # Running in mock mode (force_mock=True)
 
     def test_engine_cleanup(self, mock_engine):
         """Test engine cleanup."""
@@ -230,7 +231,55 @@ class TestHailoEngineNMS:
 class TestHailoAvailability:
     """Tests for Hailo hardware availability detection."""
 
-    def test_hailo_not_available_in_test(self):
-        """Test that Hailo is not available in test environment."""
-        # In test/development environment, HAILO_AVAILABLE should be False
+    def test_mock_engine_does_not_use_hailo(self, mock_engine):
+        """Test that mock engine does not use Hailo hardware."""
+        # With force_mock=True, engine should never use real Hailo
+        assert mock_engine._use_hailo is False
+        assert mock_engine.get_status()["using_hailo"] is False
+
+    @pytest.mark.skipif(HAILO_AVAILABLE, reason="Test only runs without Hailo hardware")
+    def test_hailo_not_available_in_dev(self):
+        """Test that Hailo is not available in development environment."""
+        # In development environment without Hailo, HAILO_AVAILABLE should be False
         assert HAILO_AVAILABLE is False
+
+
+@pytest.mark.skipif(not HAILO_AVAILABLE, reason="Hailo hardware required")
+class TestHailoHardware:
+    """Integration tests that run only on Raspberry Pi with Hailo hardware."""
+
+    def test_hailo_engine_real_inference(self):
+        """Test real Hailo inference with standard yolov8n model."""
+        from pathlib import Path
+
+        # Find the model file
+        project_root = Path(__file__).parent.parent
+        model_path = project_root / "models" / "yolov8n.hef"
+
+        if not model_path.exists():
+            pytest.skip(f"Model not found: {model_path}")
+
+        engine = HailoEngine(
+            model_path=model_path,
+            confidence_threshold=0.5,
+            classes={"15": "cat", "14": "bird"},
+            force_mock=False,  # Use real Hailo
+        )
+
+        try:
+            assert engine._use_hailo is True
+            assert engine._initialized is True
+
+            # Run inference on test frame
+            frame = np.random.randint(0, 255, (640, 640, 3), dtype=np.uint8)
+            result = engine.infer(frame)
+
+            assert result is not None
+            assert hasattr(result, "detections")
+            assert result.inference_time_ms >= 0
+
+            # Hailo should be much faster than 100ms per frame
+            assert result.inference_time_ms < 100, f"Inference too slow: {result.inference_time_ms}ms"
+
+        finally:
+            engine.cleanup()

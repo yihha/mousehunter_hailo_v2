@@ -154,6 +154,7 @@ class HailoEngine:
         confidence_threshold: float = 0.6,
         nms_iou_threshold: float = 0.45,
         classes: dict[str, str] | None = None,
+        force_mock: bool = False,
     ):
         """
         Initialize the Hailo inference engine.
@@ -163,6 +164,7 @@ class HailoEngine:
             confidence_threshold: Minimum confidence for detections
             nms_iou_threshold: IoU threshold for NMS
             classes: Class ID to name mapping (e.g., {"0": "cat", "1": "prey"})
+            force_mock: Force mock mode even if Hailo hardware is available (for testing)
         """
         self.model_path = Path(model_path)
         self.confidence_threshold = confidence_threshold
@@ -170,6 +172,8 @@ class HailoEngine:
         # Default to COCO classes for standard yolov8n.hef
         # For custom model, pass classes={"0": "cat", "1": "rodent", "2": "leaf", "3": "bird"}
         self.classes = classes or {"15": "cat", "14": "bird"}
+        self._force_mock = force_mock
+        self._use_hailo = HAILO_AVAILABLE and not force_mock
 
         # State
         self._initialized = False
@@ -180,15 +184,17 @@ class HailoEngine:
         self._detection_callbacks: list[Callable[[DetectionFrame], None]] = []
 
         # Initialize engine
-        if HAILO_AVAILABLE:
+        if self._use_hailo:
             self._init_hailo()
         else:
             self._mock_engine = MockHailoInference(str(model_path))
             self._initialized = True
+            if force_mock:
+                logger.info("Hailo engine running in forced mock mode (for testing)")
 
         logger.info(
             f"HailoEngine initialized: model={model_path}, "
-            f"threshold={confidence_threshold}"
+            f"threshold={confidence_threshold}, hailo={self._use_hailo}"
         )
 
     def _init_hailo(self) -> None:
@@ -212,6 +218,7 @@ class HailoEngine:
 
             # Get expected input shape
             self._input_shape = self._input_vstream_infos[0].shape
+            self._input_name = self._input_vstream_infos[0].name
             logger.info(f"Model input shape: {self._input_shape}")
 
             # Create virtual device
@@ -223,11 +230,14 @@ class HailoEngine:
             )
             self._network_group = self._vdevice.configure(self._hef, configure_params)[0]
 
-            # Create input/output params
-            self._input_params = InputVStreamParams.make_from_network_group(
-                self._network_group, quantized=False, format_type=FormatType.FLOAT32
+            # Create network group params for activation
+            self._network_group_params = self._network_group.create_params()
+
+            # Create input/output vstream params
+            self._input_params = InputVStreamParams.make(
+                self._network_group, quantized=False, format_type=FormatType.UINT8
             )
-            self._output_params = OutputVStreamParams.make_from_network_group(
+            self._output_params = OutputVStreamParams.make(
                 self._network_group, quantized=False, format_type=FormatType.FLOAT32
             )
 
@@ -254,7 +264,7 @@ class HailoEngine:
         start_time = time.perf_counter()
         timestamp = datetime.now()
 
-        if HAILO_AVAILABLE:
+        if self._use_hailo:
             detections = self._run_hailo_inference(frame)
         else:
             detections = self._mock_engine.infer(frame)
@@ -286,12 +296,13 @@ class HailoEngine:
         # Preprocess frame
         input_data = self._preprocess(frame)
 
-        # Run inference
-        with InferVStreams(
-            self._network_group, self._input_params, self._output_params
-        ) as pipeline:
-            input_dict = {self._input_vstream_infos[0].name: input_data}
-            output_dict = pipeline.infer(input_dict)
+        # Run inference - must activate network group first
+        with self._network_group.activate(self._network_group_params):
+            with InferVStreams(
+                self._network_group, self._input_params, self._output_params
+            ) as pipeline:
+                input_dict = {self._input_name: input_data}
+                output_dict = pipeline.infer(input_dict)
 
         # Post-process outputs
         raw_output = list(output_dict.values())[0]
@@ -307,14 +318,15 @@ class HailoEngine:
             frame: Input RGB image (HWC), uint8
 
         Returns:
-            Preprocessed tensor matching model input shape, float32
+            Preprocessed tensor matching model input shape, uint8
+            (Hailo quantized models handle normalization internally)
         """
         # Input shape is (H, W, C) = (640, 640, 3)
         target_h, target_w = self._input_shape[0], self._input_shape[1]
 
-        # Ensure frame is uint8 for PIL
+        # Ensure frame is uint8
         if frame.dtype != np.uint8:
-            frame = frame.astype(np.uint8)
+            frame = np.clip(frame, 0, 255).astype(np.uint8)
 
         # Resize if needed
         if frame.shape[0] != target_h or frame.shape[1] != target_w:
@@ -322,14 +334,11 @@ class HailoEngine:
 
             img = Image.fromarray(frame)
             img = img.resize((target_w, target_h), Image.BILINEAR)
-            frame = np.array(img)
+            frame = np.array(img, dtype=np.uint8)
 
-        # Normalize to 0-1 and convert to float32
-        preprocessed = frame.astype(np.float32) / 255.0
-
-        # Hailo expects shape (H, W, C) without batch dimension for InferVStreams
-        # The shape should match self._input_shape exactly
-        return preprocessed
+        # Hailo expects uint8 input - quantization is handled by the HEF model
+        # Shape: (H, W, C) without batch dimension for InferVStreams
+        return frame
 
     def _postprocess_yolo(
         self, raw_output: np.ndarray, original_shape: tuple[int, int]
@@ -452,12 +461,13 @@ class HailoEngine:
             "average_inference_ms": self.average_inference_time,
             "estimated_fps": self.fps,
             "hailo_available": HAILO_AVAILABLE,
+            "using_hailo": self._use_hailo,
             "classes": self.classes,
         }
 
     def cleanup(self) -> None:
         """Release Hailo resources."""
-        if HAILO_AVAILABLE and self._initialized:
+        if self._use_hailo and self._initialized:
             try:
                 del self._network_group
                 del self._vdevice

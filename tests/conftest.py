@@ -74,6 +74,7 @@ def mock_engine():
         model_path="models/yolov8n_catprey.hef",
         confidence_threshold=0.5,
         classes={"0": "cat", "1": "rodent", "2": "leaf", "3": "bird"},
+        force_mock=True,  # Ensures tests run in mock mode even on Pi with Hailo
     )
 
 
