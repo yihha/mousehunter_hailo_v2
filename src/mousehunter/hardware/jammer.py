@@ -177,6 +177,11 @@ class Jammer:
 
             self._device.off()
 
+            # Cancel any pending watchdog task
+            if self._watchdog_task and not self._watchdog_task.done():
+                self._watchdog_task.cancel()
+                self._watchdog_task = None
+
             # Calculate duration
             duration = 0.0
             if self._activation_time:

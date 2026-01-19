@@ -50,7 +50,10 @@ class MockHailoInference:
         logger.info(f"[MOCK] Hailo model loaded: {model_path}")
 
     def infer(self, frame: np.ndarray) -> list[Detection]:
-        """Generate mock detections with realistic spatial relationships."""
+        """Generate mock detections with realistic spatial relationships.
+
+        Custom model classes: 0=cat, 1=rodent, 2=leaf, 3=bird
+        """
         detections = []
 
         # 15% chance of detecting a cat
@@ -63,7 +66,7 @@ class MockHailoInference:
 
             detections.append(
                 Detection(
-                    class_id=0,
+                    class_id=0,  # Custom model: cat = 0
                     class_name="cat",
                     confidence=np.random.uniform(0.70, 0.98),
                     bbox=BoundingBox(x=cat_x, y=cat_y, width=cat_w, height=cat_h),
@@ -80,7 +83,7 @@ class MockHailoInference:
 
                 detections.append(
                     Detection(
-                        class_id=1,
+                        class_id=1,  # Custom model: rodent = 1
                         class_name="rodent",
                         confidence=np.random.uniform(0.50, 0.85),
                         bbox=BoundingBox(
@@ -103,7 +106,7 @@ class MockHailoInference:
 
                 detections.append(
                     Detection(
-                        class_id=2,
+                        class_id=3,  # Custom model: bird = 3
                         class_name="bird",
                         confidence=np.random.uniform(0.40, 0.75),
                         bbox=BoundingBox(
@@ -111,6 +114,22 @@ class MockHailoInference:
                             y=bird_y,
                             width=np.random.uniform(0.05, 0.10),
                             height=np.random.uniform(0.04, 0.08),
+                        ),
+                    )
+                )
+
+            # 3% chance of leaf (false positive that should be ignored)
+            elif np.random.random() < 0.03:
+                detections.append(
+                    Detection(
+                        class_id=2,  # Custom model: leaf = 2
+                        class_name="leaf",
+                        confidence=np.random.uniform(0.40, 0.70),
+                        bbox=BoundingBox(
+                            x=np.random.uniform(0.1, 0.8),
+                            y=np.random.uniform(0.1, 0.8),
+                            width=np.random.uniform(0.03, 0.08),
+                            height=np.random.uniform(0.02, 0.06),
                         ),
                     )
                 )
@@ -148,9 +167,8 @@ class HailoEngine:
         self.model_path = Path(model_path)
         self.confidence_threshold = confidence_threshold
         self.nms_iou_threshold = nms_iou_threshold
-        # Default to COCO classes for cat/bird detection
-        # COCO: 14=bird, 15=cat (no rodent in COCO)
-        self.classes = classes or {"15": "cat", "14": "bird"}
+        # Default to custom model classes (0=cat, 1=rodent, 2=leaf, 3=bird)
+        self.classes = classes or {"0": "cat", "1": "rodent", "2": "leaf", "3": "bird"}
 
         # State
         self._initialized = False

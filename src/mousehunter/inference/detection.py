@@ -189,8 +189,9 @@ class DetectionFrame:
 
     @property
     def has_prey(self) -> bool:
-        """Check if frame contains a prey detection."""
-        return any(d.class_name.lower() == "prey" for d in self.detections)
+        """Check if frame contains a prey detection (rodent or bird)."""
+        prey_classes = {"rodent", "bird", "prey"}
+        return any(d.class_name.lower() in prey_classes for d in self.detections)
 
     @property
     def has_cat_with_prey(self) -> bool:

@@ -104,9 +104,9 @@ class InferenceConfig(BaseSettings):
     )
     classes: dict[str, str] = Field(
         default=_json_config.get("inference", {}).get(
-            "classes", {"0": "cat", "1": "rodent", "2": "bird"}
+            "classes", {"0": "cat", "1": "rodent", "2": "leaf", "3": "bird"}
         ),
-        description="Class ID to name mapping",
+        description="Class ID to name mapping (custom model: cat, rodent, leaf, bird)",
     )
 
     # Per-class confidence thresholds

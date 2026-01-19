@@ -24,9 +24,9 @@ def sample_bbox():
 
 @pytest.fixture
 def cat_detection(sample_bbox):
-    """A sample cat detection (COCO class 15)."""
+    """A sample cat detection (custom model class 0)."""
     return Detection(
-        class_id=15,
+        class_id=0,
         class_name="cat",
         confidence=0.85,
         bbox=sample_bbox,
@@ -58,9 +58,9 @@ def rodent_far_detection():
 
 @pytest.fixture
 def bird_detection():
-    """A sample bird detection (COCO class 14)."""
+    """A sample bird detection (custom model class 3)."""
     return Detection(
-        class_id=14,
+        class_id=3,
         class_name="bird",
         confidence=0.85,
         bbox=BoundingBox(x=0.48, y=0.38, width=0.07, height=0.06),

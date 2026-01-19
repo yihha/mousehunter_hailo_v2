@@ -244,8 +244,12 @@ class CameraService:
                 # Capture both streams (synchronized if using Picamera2)
                 if PICAMERA_AVAILABLE:
                     request = self._camera.capture_request()
-                    main_frame = request.make_array("main")
-                    inference_frame = request.make_array("lores")
+                    try:
+                        main_frame = request.make_array("main")
+                        inference_frame = request.make_array("lores")
+                    finally:
+                        # CRITICAL: Must release request to avoid buffer exhaustion
+                        request.release()
                 else:
                     # Mock capture
                     main_frame = self._camera.capture_array("main")
