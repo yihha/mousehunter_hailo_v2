@@ -90,6 +90,20 @@ class CameraConfig(BaseSettings):
             return tuple(v)
         return v
 
+    @field_validator("framerate")
+    @classmethod
+    def validate_framerate(cls, v):
+        if v < 1 or v > 120:
+            raise ValueError(f"framerate must be between 1 and 120, got {v}")
+        return v
+
+    @field_validator("buffer_seconds")
+    @classmethod
+    def validate_buffer_seconds(cls, v):
+        if v < 1 or v > 300:
+            raise ValueError(f"buffer_seconds must be between 1 and 300, got {v}")
+        return v
+
 
 class InferenceConfig(BaseSettings):
     """Hailo-8L inference engine configuration."""
@@ -144,6 +158,37 @@ class InferenceConfig(BaseSettings):
         ),
         description="Number of positive detections in window to trigger",
     )
+
+    @field_validator("thresholds")
+    @classmethod
+    def validate_thresholds(cls, v):
+        for class_name, threshold in v.items():
+            if not 0.0 <= threshold <= 1.0:
+                raise ValueError(f"threshold for {class_name} must be 0.0-1.0, got {threshold}")
+        return v
+
+    @field_validator("box_expansion")
+    @classmethod
+    def validate_box_expansion(cls, v):
+        if v < 0.0 or v > 2.0:
+            raise ValueError(f"box_expansion must be 0.0-2.0, got {v}")
+        return v
+
+    @field_validator("window_size")
+    @classmethod
+    def validate_window_size(cls, v):
+        if v < 1 or v > 30:
+            raise ValueError(f"window_size must be 1-30, got {v}")
+        return v
+
+    @field_validator("trigger_count")
+    @classmethod
+    def validate_trigger_count(cls, v, info):
+        if v < 1:
+            raise ValueError(f"trigger_count must be >= 1, got {v}")
+        # Note: Can't validate against window_size here as it may not be set yet
+        # This is validated at runtime in PreyDetector
+        return v
 
     # Legacy fields for backwards compatibility
     @property
@@ -276,19 +321,33 @@ recording_config = RecordingConfig()
 
 
 def setup_logging() -> None:
-    """Configure logging for the application."""
+    """Configure logging for the application with log rotation."""
+    from logging.handlers import RotatingFileHandler
+
     log_dir = Path(logging_config.file).parent
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    logging.basicConfig(
-        level=getattr(logging, logging_config.level.upper()),
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        handlers=[
-            logging.FileHandler(logging_config.file),
-            logging.StreamHandler(),
-        ],
+    # Use RotatingFileHandler to prevent disk fill (10MB max, keep 5 backups)
+    file_handler = RotatingFileHandler(
+        logging_config.file,
+        maxBytes=10 * 1024 * 1024,  # 10 MB
+        backupCount=5,
+        encoding="utf-8",
     )
-    logger.info(f"Logging configured: level={logging_config.level}, file={logging_config.file}")
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    )
+
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(getattr(logging, logging_config.level.upper()))
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(logging.StreamHandler())
+
+    logger.info(
+        f"Logging configured: level={logging_config.level}, "
+        f"file={logging_config.file} (rotating, 10MB max, 5 backups)"
+    )
 
 
 def ensure_runtime_dirs() -> None:

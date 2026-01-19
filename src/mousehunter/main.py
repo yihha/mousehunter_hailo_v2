@@ -63,6 +63,9 @@ class MouseHunterController:
         self._detection_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
 
+        # Background async tasks (for proper cancellation on shutdown)
+        self._background_tasks: list[asyncio.Task] = []
+
         # State tracking
         self._last_state_change = datetime.now()
         self._lockdown_start: datetime | None = None
@@ -116,12 +119,13 @@ class MouseHunterController:
         self._running = True
         logger.info("System initialization complete")
 
-        # Start background tasks
-        tasks = []
+        # Start background tasks (store for proper cancellation on shutdown)
+        self._background_tasks = []
 
         # Start Telegram bot if enabled
         if telegram_config.enabled and self._telegram:
-            tasks.append(asyncio.create_task(self._telegram.start()))
+            task = asyncio.create_task(self._telegram.start(), name="telegram_bot")
+            self._background_tasks.append(task)
             logger.info("Telegram bot task started")
 
         # Start API server if enabled
@@ -134,18 +138,18 @@ class MouseHunterController:
                 camera=self._camera,
                 detector=self._detector,
             )
-            tasks.append(
-                asyncio.create_task(
-                    start_server(
-                        host=api_config.host,
-                        port=api_config.port,
-                        jammer=self._jammer,
-                        audio=self._audio,
-                        camera=self._camera,
-                        detector=self._detector,
-                    )
-                )
+            task = asyncio.create_task(
+                start_server(
+                    host=api_config.host,
+                    port=api_config.port,
+                    jammer=self._jammer,
+                    audio=self._audio,
+                    camera=self._camera,
+                    detector=self._detector,
+                ),
+                name="api_server",
             )
+            self._background_tasks.append(task)
             logger.info(f"API server task started on {api_config.host}:{api_config.port}")
 
         # Start detection pipeline in background thread
@@ -281,10 +285,21 @@ class MouseHunterController:
         signal.signal(signal.SIGTERM, signal_handler)
 
     def _start_detection_thread(self) -> None:
-        """Start the detection pipeline in a background thread."""
-        if self._camera is None or self._detector is None:
-            logger.error("Cannot start detection: camera or detector not available")
-            return
+        """Start the detection pipeline in a background thread.
+
+        Raises:
+            RuntimeError: If camera or detector are not available
+        """
+        missing = []
+        if self._camera is None:
+            missing.append("camera")
+        if self._detector is None:
+            missing.append("detector")
+
+        if missing:
+            error_msg = f"Cannot start detection: {', '.join(missing)} not available"
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
 
         self._stop_event.clear()
         self._detection_thread = threading.Thread(
@@ -477,7 +492,25 @@ class MouseHunterController:
         """Clean shutdown of all components."""
         logger.info("Initiating shutdown...")
 
-        # Stop detection thread first (before cleanup to avoid race conditions)
+        # Cancel background tasks first (API server, Telegram)
+        if self._background_tasks:
+            logger.info(f"Cancelling {len(self._background_tasks)} background tasks...")
+            for task in self._background_tasks:
+                if not task.done():
+                    task.cancel()
+
+            # Wait for tasks to complete with timeout
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*self._background_tasks, return_exceptions=True),
+                    timeout=5.0,
+                )
+                logger.info("Background tasks cancelled successfully")
+            except asyncio.TimeoutError:
+                logger.warning("Background tasks did not cancel within 5s")
+            self._background_tasks.clear()
+
+        # Stop detection thread (before cleanup to avoid race conditions)
         self._stop_event.set()
         if self._detection_thread:
             logger.info("Waiting for detection thread to stop...")

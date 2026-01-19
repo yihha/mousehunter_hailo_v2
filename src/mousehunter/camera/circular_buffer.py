@@ -303,8 +303,19 @@ class CircularVideoBuffer:
     def clear(self) -> None:
         """Clear all frames from the buffer."""
         with self._lock:
+            # Explicitly delete frame data to help garbage collection
+            for frame in self._buffer:
+                del frame.frame_data
             self._buffer.clear()
             logger.info("Buffer cleared")
+
+    def cleanup(self) -> None:
+        """Clean up buffer resources and release memory."""
+        self.clear()
+        # Force garbage collection for large numpy arrays
+        import gc
+        gc.collect()
+        logger.info("CircularBuffer cleanup complete")
 
     def get_status(self) -> dict:
         """Get buffer status."""

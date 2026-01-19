@@ -370,7 +370,11 @@ class CameraService:
     def cleanup(self) -> None:
         """Clean up camera resources."""
         self.stop()
-        self._camera.close()
+        # Clean up buffer to release frame memory
+        if self.buffer:
+            self.buffer.cleanup()
+        if PICAMERA_AVAILABLE:
+            self._camera.close()
         logger.info("Camera resources cleaned up")
 
     def __enter__(self):

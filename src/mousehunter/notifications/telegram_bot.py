@@ -20,6 +20,7 @@ from tenacity import (
     stop_after_attempt,
     retry_if_exception_type,
     before_sleep_log,
+    wait_exponential,
 )
 
 logger = logging.getLogger(__name__)
@@ -389,14 +390,23 @@ class TelegramBot:
 
     # ==================== Notification Methods ====================
 
+    # Build retry exceptions based on availability
+    # When TELEGRAM_AVAILABLE, retry on network errors; otherwise no retry for mock mode
+    _RETRY_EXCEPTIONS = (
+        (TimedOut, NetworkError, TelegramError, ConnectionError, TimeoutError)
+        if TELEGRAM_AVAILABLE
+        else (type(None),)  # Never matches - effectively disables retry for mock
+    )
+
     @retry(
         stop=stop_after_attempt(3),
-        retry=retry_if_exception_type((Exception,)) if TELEGRAM_AVAILABLE else retry_if_exception_type(()),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type(_RETRY_EXCEPTIONS),
         before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True,
     )
     async def send_message(self, text: str) -> None:
-        """Send a text message."""
+        """Send a text message with retry on network errors."""
         if not self.enabled or not self._app:
             logger.debug(f"[DISABLED] Would send: {text}")
             return
@@ -406,7 +416,8 @@ class TelegramBot:
 
     @retry(
         stop=stop_after_attempt(3),
-        retry=retry_if_exception_type((Exception,)) if TELEGRAM_AVAILABLE else retry_if_exception_type(()),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type(_RETRY_EXCEPTIONS),
         before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True,
     )

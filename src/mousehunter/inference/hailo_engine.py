@@ -501,9 +501,26 @@ class HailoEngine:
     def cleanup(self) -> None:
         """Release Hailo resources."""
         # Shutdown thread pool executor first
+        # Use wait=False initially to avoid blocking if a future is stuck
+        # cancel_futures=False to let running inference complete gracefully
         if self._inference_executor:
-            self._inference_executor.shutdown(wait=True, cancel_futures=True)
-            self._inference_executor = None
+            try:
+                # Give running tasks a chance to complete (non-blocking check)
+                self._inference_executor.shutdown(wait=False, cancel_futures=False)
+                # Now wait with a timeout for clean shutdown
+                import time
+                shutdown_start = time.time()
+                while time.time() - shutdown_start < 3.0:  # 3 second timeout
+                    # Check if executor threads are done
+                    if not any(t.is_alive() for t in self._inference_executor._threads):
+                        break
+                    time.sleep(0.1)
+                else:
+                    logger.warning("Inference executor did not shutdown cleanly within 3s")
+            except Exception as e:
+                logger.error(f"Error shutting down inference executor: {e}")
+            finally:
+                self._inference_executor = None
 
         if self._use_hailo and self._initialized:
             try:

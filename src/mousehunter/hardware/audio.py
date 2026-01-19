@@ -19,15 +19,35 @@ from typing import Callable
 logger = logging.getLogger(__name__)
 
 # Conditional import for headless development
+# Note: pygame.mixer.init() is deferred to first use for thread safety
 try:
     import pygame
-
-    pygame.mixer.init()
     PYGAME_AVAILABLE = True
-    logger.info("pygame mixer initialized")
-except Exception as e:
+except ImportError as e:
     PYGAME_AVAILABLE = False
     logger.warning(f"pygame not available: {e} - audio will be simulated")
+
+# Module-level lock for pygame.mixer operations (pygame is not thread-safe)
+_pygame_lock = threading.Lock()
+_pygame_initialized = False
+
+
+def _ensure_pygame_initialized() -> bool:
+    """Initialize pygame.mixer if not already done (thread-safe)."""
+    global _pygame_initialized
+    if not PYGAME_AVAILABLE:
+        return False
+
+    with _pygame_lock:
+        if not _pygame_initialized:
+            try:
+                pygame.mixer.init()
+                _pygame_initialized = True
+                logger.info("pygame mixer initialized")
+            except Exception as e:
+                logger.error(f"Failed to initialize pygame mixer: {e}")
+                return False
+    return True
 
 
 class AudioDeterrent:
@@ -76,8 +96,12 @@ class AudioDeterrent:
     def volume(self, value: float) -> None:
         """Set volume level (0.0 to 1.0)."""
         self._volume = max(0.0, min(1.0, value))
-        if self._sound and PYGAME_AVAILABLE:
-            self._sound.set_volume(self._volume)
+        if self._sound and _pygame_initialized:
+            with _pygame_lock:
+                try:
+                    self._sound.set_volume(self._volume)
+                except Exception as e:
+                    logger.error(f"Error setting volume: {e}")
         logger.info(f"Volume set to {self._volume}")
 
     @property
@@ -108,16 +132,17 @@ class AudioDeterrent:
 
         self._sound_file = sound_path
 
-        if PYGAME_AVAILABLE:
-            try:
-                self._sound = pygame.mixer.Sound(str(sound_path))
-                self._sound.set_volume(self._volume)
-                logger.info(f"Loaded sound: {sound_path}")
-                return True
-            except Exception as e:
-                logger.error(f"Failed to load sound {sound_path}: {e}")
-                self._sound = None
-                return False
+        if _ensure_pygame_initialized():
+            with _pygame_lock:
+                try:
+                    self._sound = pygame.mixer.Sound(str(sound_path))
+                    self._sound.set_volume(self._volume)
+                    logger.info(f"Loaded sound: {sound_path}")
+                    return True
+                except Exception as e:
+                    logger.error(f"Failed to load sound {sound_path}: {e}")
+                    self._sound = None
+                    return False
         else:
             logger.info(f"[MOCK] Would load sound: {sound_path}")
             return True
@@ -141,23 +166,24 @@ class AudioDeterrent:
                 logger.debug("Already playing, ignoring play request")
                 return False
 
-            if PYGAME_AVAILABLE and self._sound:
-                try:
-                    self._sound.play(loops=loops)
-                    self._is_playing = True
-                    logger.info("SCREAM! Audio deterrent triggered")
+            if _ensure_pygame_initialized() and self._sound:
+                with _pygame_lock:
+                    try:
+                        self._sound.play(loops=loops)
+                        self._is_playing = True
+                        logger.info("SCREAM! Audio deterrent triggered")
+                    except Exception as e:
+                        logger.error(f"Failed to play sound: {e}")
+                        return False
 
-                    # Notify callbacks
-                    for callback in self._on_play_callbacks:
-                        try:
-                            callback()
-                        except Exception as e:
-                            logger.error(f"Play callback error: {e}")
+                # Notify callbacks (outside pygame lock to avoid deadlock)
+                for callback in self._on_play_callbacks:
+                    try:
+                        callback()
+                    except Exception as e:
+                        logger.error(f"Play callback error: {e}")
 
-                    return True
-                except Exception as e:
-                    logger.error(f"Failed to play sound: {e}")
-                    return False
+                return True
             else:
                 # Simulation mode
                 self._is_playing = True
@@ -167,8 +193,12 @@ class AudioDeterrent:
     def stop(self) -> None:
         """Stop any currently playing sound."""
         with self._lock:
-            if PYGAME_AVAILABLE and self._sound:
-                self._sound.stop()
+            if _pygame_initialized and self._sound:
+                with _pygame_lock:
+                    try:
+                        self._sound.stop()
+                    except Exception as e:
+                        logger.error(f"Error stopping sound: {e}")
             self._is_playing = False
             logger.debug("Audio playback stopped")
 
@@ -211,12 +241,15 @@ class AudioDeterrent:
 
     def cleanup(self) -> None:
         """Clean up audio resources."""
+        global _pygame_initialized
         self.stop()
-        if PYGAME_AVAILABLE:
-            try:
-                pygame.mixer.quit()
-            except Exception:
-                pass
+        if _pygame_initialized:
+            with _pygame_lock:
+                try:
+                    pygame.mixer.quit()
+                    _pygame_initialized = False
+                except Exception as e:
+                    logger.error(f"Error cleaning up pygame mixer: {e}")
         logger.info("Audio resources cleaned up")
 
 
