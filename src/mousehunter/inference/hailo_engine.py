@@ -50,38 +50,67 @@ class MockHailoInference:
         logger.info(f"[MOCK] Hailo model loaded: {model_path}")
 
     def infer(self, frame: np.ndarray) -> list[Detection]:
-        """Generate mock detections."""
-        # Simulate random detections for testing
+        """Generate mock detections with realistic spatial relationships."""
         detections = []
 
-        # 10% chance of detecting a cat
-        if np.random.random() < 0.1:
+        # 15% chance of detecting a cat
+        if np.random.random() < 0.15:
+            # Cat position (center-ish)
+            cat_x = np.random.uniform(0.25, 0.55)
+            cat_y = np.random.uniform(0.25, 0.55)
+            cat_w = np.random.uniform(0.15, 0.30)
+            cat_h = np.random.uniform(0.15, 0.30)
+
             detections.append(
                 Detection(
                     class_id=0,
                     class_name="cat",
-                    confidence=np.random.uniform(0.7, 0.95),
-                    bbox=BoundingBox(
-                        x=np.random.uniform(0.2, 0.6),
-                        y=np.random.uniform(0.2, 0.6),
-                        width=np.random.uniform(0.1, 0.3),
-                        height=np.random.uniform(0.1, 0.3),
-                    ),
+                    confidence=np.random.uniform(0.70, 0.98),
+                    bbox=BoundingBox(x=cat_x, y=cat_y, width=cat_w, height=cat_h),
                 )
             )
 
-            # 5% chance of also detecting prey
-            if np.random.random() < 0.05:
+            # 8% chance of also detecting rodent (spatially near cat)
+            if np.random.random() < 0.08:
+                # Place rodent near cat's "mouth" area (front of cat box)
+                rodent_x = cat_x + cat_w * np.random.uniform(0.6, 0.9)
+                rodent_y = cat_y + cat_h * np.random.uniform(0.2, 0.5)
+                rodent_w = np.random.uniform(0.04, 0.08)
+                rodent_h = np.random.uniform(0.03, 0.06)
+
                 detections.append(
                     Detection(
                         class_id=1,
-                        class_name="prey",
-                        confidence=np.random.uniform(0.6, 0.85),
+                        class_name="rodent",
+                        confidence=np.random.uniform(0.50, 0.85),
                         bbox=BoundingBox(
-                            x=np.random.uniform(0.3, 0.5),
-                            y=np.random.uniform(0.3, 0.5),
-                            width=np.random.uniform(0.05, 0.1),
-                            height=np.random.uniform(0.05, 0.1),
+                            x=rodent_x, y=rodent_y, width=rodent_w, height=rodent_h
+                        ),
+                    )
+                )
+
+            # 2% chance of bird (rare, usually not overlapping)
+            elif np.random.random() < 0.02:
+                # Bird might be anywhere, sometimes overlapping
+                if np.random.random() < 0.5:
+                    # Overlapping with cat
+                    bird_x = cat_x + cat_w * np.random.uniform(0.3, 0.7)
+                    bird_y = cat_y + cat_h * np.random.uniform(0.1, 0.4)
+                else:
+                    # Random position (might not overlap)
+                    bird_x = np.random.uniform(0.1, 0.7)
+                    bird_y = np.random.uniform(0.1, 0.7)
+
+                detections.append(
+                    Detection(
+                        class_id=2,
+                        class_name="bird",
+                        confidence=np.random.uniform(0.40, 0.75),
+                        bbox=BoundingBox(
+                            x=bird_x,
+                            y=bird_y,
+                            width=np.random.uniform(0.05, 0.10),
+                            height=np.random.uniform(0.04, 0.08),
                         ),
                     )
                 )
@@ -119,7 +148,7 @@ class HailoEngine:
         self.model_path = Path(model_path)
         self.confidence_threshold = confidence_threshold
         self.nms_iou_threshold = nms_iou_threshold
-        self.classes = classes or {"0": "cat", "1": "prey"}
+        self.classes = classes or {"0": "cat", "1": "rodent", "2": "bird"}
 
         # State
         self._initialized = False

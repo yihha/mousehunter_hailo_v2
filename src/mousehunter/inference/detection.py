@@ -65,6 +65,55 @@ class BoundingBox:
 
         return intersection / union if union > 0 else 0.0
 
+    def intersects(self, other: "BoundingBox") -> bool:
+        """
+        Check if this box intersects (overlaps) with another box.
+
+        Args:
+            other: Another bounding box
+
+        Returns:
+            True if boxes overlap, False otherwise
+        """
+        return not (
+            self.right < other.x
+            or other.right < self.x
+            or self.bottom < other.y
+            or other.bottom < self.y
+        )
+
+    def expanded(self, factor: float) -> "BoundingBox":
+        """
+        Return a new box expanded by a factor around its center.
+
+        Args:
+            factor: Expansion factor (0.25 = 25% larger in each dimension)
+
+        Returns:
+            New expanded BoundingBox
+        """
+        expand_w = self.width * factor
+        expand_h = self.height * factor
+        return BoundingBox(
+            x=self.x - expand_w / 2,
+            y=self.y - expand_h / 2,
+            width=self.width + expand_w,
+            height=self.height + expand_h,
+        )
+
+    def contains_point(self, px: float, py: float) -> bool:
+        """
+        Check if a point is inside this bounding box.
+
+        Args:
+            px: Point X coordinate
+            py: Point Y coordinate
+
+        Returns:
+            True if point is inside box
+        """
+        return self.x <= px <= self.right and self.y <= py <= self.bottom
+
     def to_pixels(self, width: int, height: int) -> "BoundingBox":
         """
         Convert normalized coordinates to pixel coordinates.

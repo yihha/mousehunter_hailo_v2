@@ -102,25 +102,63 @@ class InferenceConfig(BaseSettings):
         ),
         description="Path to compiled Hailo HEF model",
     )
-    confidence_threshold: float = Field(
-        default=_json_config.get("inference", {}).get("confidence_threshold", 0.60),
-        description="Minimum confidence for prey detection trigger",
-    )
-    consecutive_frames_required: int = Field(
-        default=_json_config.get("inference", {}).get("consecutive_frames_required", 3),
-        description="Consecutive frames with prey detection to trigger lockdown",
-    )
     classes: dict[str, str] = Field(
-        default=_json_config.get("inference", {}).get("classes", {"0": "cat", "1": "prey"}),
+        default=_json_config.get("inference", {}).get(
+            "classes", {"0": "cat", "1": "rodent", "2": "bird"}
+        ),
         description="Class ID to name mapping",
     )
 
-    @field_validator("confidence_threshold")
-    @classmethod
-    def validate_threshold(cls, v: float) -> float:
-        if not 0.0 <= v <= 1.0:
-            raise ValueError("Confidence threshold must be between 0 and 1")
-        return v
+    # Per-class confidence thresholds
+    thresholds: dict[str, float] = Field(
+        default=_json_config.get("inference", {}).get(
+            "thresholds", {"cat": 0.55, "rodent": 0.45, "bird": 0.80}
+        ),
+        description="Per-class confidence thresholds",
+    )
+
+    # Spatial validation settings
+    spatial_validation_enabled: bool = Field(
+        default=_json_config.get("inference", {}).get("spatial_validation", {}).get(
+            "enabled", True
+        ),
+        description="Require prey to be spatially near cat",
+    )
+    box_expansion: float = Field(
+        default=_json_config.get("inference", {}).get("spatial_validation", {}).get(
+            "box_expansion", 0.25
+        ),
+        description="Expand cat box by this factor for intersection check",
+    )
+
+    # Temporal smoothing (rolling window)
+    window_size: int = Field(
+        default=_json_config.get("inference", {}).get("temporal_smoothing", {}).get(
+            "window_size", 5
+        ),
+        description="Rolling window size for detection smoothing",
+    )
+    trigger_count: int = Field(
+        default=_json_config.get("inference", {}).get("temporal_smoothing", {}).get(
+            "trigger_count", 3
+        ),
+        description="Number of positive detections in window to trigger",
+    )
+
+    # Legacy fields for backwards compatibility
+    @property
+    def confidence_threshold(self) -> float:
+        """Legacy: return rodent threshold as default."""
+        return self.thresholds.get("rodent", 0.45)
+
+    @property
+    def consecutive_frames_required(self) -> int:
+        """Legacy: map to trigger_count."""
+        return self.trigger_count
+
+    def get_threshold(self, class_name: str) -> float:
+        """Get confidence threshold for a specific class."""
+        return self.thresholds.get(class_name.lower(), 0.5)
 
 
 class JammerConfig(BaseSettings):

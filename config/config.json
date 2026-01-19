@@ -14,11 +14,23 @@
     },
     "inference": {
         "model_path": "models/yolov8n_catprey.hef",
-        "confidence_threshold": 0.60,
-        "consecutive_frames_required": 3,
         "classes": {
             "0": "cat",
-            "1": "prey"
+            "1": "rodent",
+            "2": "bird"
+        },
+        "thresholds": {
+            "cat": 0.55,
+            "rodent": 0.45,
+            "bird": 0.80
+        },
+        "spatial_validation": {
+            "enabled": true,
+            "box_expansion": 0.25
+        },
+        "temporal_smoothing": {
+            "window_size": 5,
+            "trigger_count": 3
         }
     },
     "jammer": {

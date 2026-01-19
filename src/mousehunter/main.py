@@ -68,6 +68,7 @@ class MouseHunterController:
         self._cooldown_start: datetime | None = None
         self._detection_count = 0
         self._lockdown_count = 0
+        self._last_prey_event = None  # Most recent prey detection event
 
         # Callbacks
         self._on_state_change_callbacks: list[Callable[[SystemState], None]] = []
@@ -331,9 +332,15 @@ class MouseHunterController:
 
         Transitions to LOCKDOWN state and triggers all interdiction actions.
         """
-        logger.warning(f"PREY DETECTED! Confidence: {event.confidence:.2f}")
+        logger.warning(
+            f"PREY DETECTED! {event.prey_detection.class_name} "
+            f"({event.prey_detection.confidence:.2f}) with cat "
+            f"({event.cat_detection.confidence:.2f}), "
+            f"window: {event.detections_in_window}/{event.window_size}"
+        )
 
         self._detection_count += 1
+        self._last_prey_event = event  # Store for Telegram notification
 
         # Capture evidence image
         image_bytes = None
@@ -387,8 +394,14 @@ class MouseHunterController:
         # 3. Send Telegram notification
         if self._telegram:
             try:
+                # Get prey details from the last detection event
+                prey_info = getattr(self, '_last_prey_event', None)
+                prey_type = prey_info.prey_detection.class_name if prey_info else "prey"
+                prey_conf = prey_info.prey_detection.confidence if prey_info else 0.0
+
                 message = (
-                    "PREY DETECTED!\n"
+                    f"PREY DETECTED: {prey_type.upper()}\n"
+                    f"Confidence: {prey_conf:.0%}\n"
                     f"Cat flap locked for {jammer_config.lockdown_duration_seconds}s.\n"
                     f"Detection #{self._detection_count}"
                 )
