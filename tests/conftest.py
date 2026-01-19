@@ -69,10 +69,11 @@ def bird_detection():
 
 @pytest.fixture
 def mock_engine():
-    """Create a HailoEngine in mock mode."""
+    """Create a HailoEngine in mock mode with custom model classes."""
     return HailoEngine(
         model_path="models/yolov8n_catprey.hef",
         confidence_threshold=0.5,
+        classes={"0": "cat", "1": "rodent", "2": "leaf", "3": "bird"},
     )
 
 

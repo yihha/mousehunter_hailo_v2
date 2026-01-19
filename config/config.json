@@ -1,4 +1,5 @@
 {
+    "_comment": "To switch models: change model_path and classes section below",
     "telegram": {
         "bot_token": "",
         "chat_id": "",
@@ -13,12 +14,22 @@
         "hflip": false
     },
     "inference": {
-        "model_path": "models/yolov8n_catprey.hef",
+        "_model_options": {
+            "standard_yolov8n": {
+                "model_path": "models/yolov8n.hef",
+                "classes": {"15": "cat", "14": "bird"},
+                "note": "COCO classes - no rodent detection"
+            },
+            "custom_catprey": {
+                "model_path": "models/yolov8n_catprey.hef",
+                "classes": {"0": "cat", "1": "rodent", "2": "leaf", "3": "bird"},
+                "note": "Custom trained model with rodent detection"
+            }
+        },
+        "model_path": "models/yolov8n.hef",
         "classes": {
-            "0": "cat",
-            "1": "rodent",
-            "2": "leaf",
-            "3": "bird"
+            "15": "cat",
+            "14": "bird"
         },
         "thresholds": {
             "cat": 0.55,

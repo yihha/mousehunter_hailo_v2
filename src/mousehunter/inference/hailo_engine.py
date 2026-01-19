@@ -167,8 +167,9 @@ class HailoEngine:
         self.model_path = Path(model_path)
         self.confidence_threshold = confidence_threshold
         self.nms_iou_threshold = nms_iou_threshold
-        # Default to custom model classes (0=cat, 1=rodent, 2=leaf, 3=bird)
-        self.classes = classes or {"0": "cat", "1": "rodent", "2": "leaf", "3": "bird"}
+        # Default to COCO classes for standard yolov8n.hef
+        # For custom model, pass classes={"0": "cat", "1": "rodent", "2": "leaf", "3": "bird"}
+        self.classes = classes or {"15": "cat", "14": "bird"}
 
         # State
         self._initialized = False
