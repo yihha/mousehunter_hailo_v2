@@ -51,11 +51,11 @@ Relay (NO/COM) --> DONGKER 5V Power
 # Update system
 sudo apt update && sudo apt upgrade -y
 
-# Enable PCIe Gen 3 for Hailo
+# Enable PCIe for Hailo (Gen 2 recommended for stability)
 sudo nano /boot/firmware/config.txt
 # Add these lines:
 # dtparam=pciex1
-# dtparam=pciex1_gen=3
+# dtparam=pciex1_gen=2
 
 # Reboot
 sudo reboot
@@ -264,6 +264,15 @@ lspci | grep Hailo
 # Check kernel module
 dmesg | grep hailo
 ```
+
+### Hailo crashes or system instability
+PCIe Gen 3 can cause instability on Raspberry Pi 5. Switch to Gen 2:
+```bash
+# Edit /boot/firmware/config.txt
+# Change dtparam=pciex1_gen=3 to:
+dtparam=pciex1_gen=2
+```
+Gen 2 provides sufficient bandwidth for YOLOv8n inference at 30fps. The performance difference is negligible for this workload.
 
 ### GPIO permission denied
 ```bash
