@@ -148,7 +148,9 @@ class HailoEngine:
         self.model_path = Path(model_path)
         self.confidence_threshold = confidence_threshold
         self.nms_iou_threshold = nms_iou_threshold
-        self.classes = classes or {"0": "cat", "1": "rodent", "2": "bird"}
+        # Default to COCO classes for cat/bird detection
+        # COCO: 14=bird, 15=cat (no rodent in COCO)
+        self.classes = classes or {"15": "cat", "14": "bird"}
 
         # State
         self._initialized = False
@@ -283,83 +285,99 @@ class HailoEngine:
         Preprocess frame for YOLO inference.
 
         Args:
-            frame: Input RGB image (HWC)
+            frame: Input RGB image (HWC), uint8
 
         Returns:
-            Preprocessed tensor (NHWC or NCHW depending on model)
+            Preprocessed tensor matching model input shape, float32
         """
-        target_h, target_w = self._input_shape[1:3]
+        # Input shape is (H, W, C) = (640, 640, 3)
+        target_h, target_w = self._input_shape[0], self._input_shape[1]
+
+        # Ensure frame is uint8 for PIL
+        if frame.dtype != np.uint8:
+            frame = frame.astype(np.uint8)
 
         # Resize if needed
-        if frame.shape[:2] != (target_h, target_w):
+        if frame.shape[0] != target_h or frame.shape[1] != target_w:
             from PIL import Image
 
             img = Image.fromarray(frame)
             img = img.resize((target_w, target_h), Image.BILINEAR)
             frame = np.array(img)
 
-        # Normalize to 0-1
-        frame = frame.astype(np.float32) / 255.0
+        # Normalize to 0-1 and convert to float32
+        preprocessed = frame.astype(np.float32) / 255.0
 
-        # Add batch dimension
-        return np.expand_dims(frame, axis=0)
+        # Hailo expects shape (H, W, C) without batch dimension for InferVStreams
+        # The shape should match self._input_shape exactly
+        return preprocessed
 
     def _postprocess_yolo(
         self, raw_output: np.ndarray, original_shape: tuple[int, int]
     ) -> list[Detection]:
         """
-        Post-process YOLOv8 output.
+        Post-process YOLOv8 output from Hailo NMS.
+
+        Hailo's yolov8_nms_postprocess output format: (num_classes, 5, max_detections)
+        - num_classes: 80 for COCO
+        - 5: (y_min, x_min, y_max, x_max, score) normalized 0-1
+        - max_detections: 100 per class
 
         Args:
-            raw_output: Raw network output
-            original_shape: Original image (H, W)
+            raw_output: Raw network output from Hailo NMS
+            original_shape: Original image (H, W) - not used, coords are normalized
 
         Returns:
             List of Detection objects
         """
-        # YOLOv8 output format: [batch, num_detections, 4 + num_classes]
-        # Box format: [x_center, y_center, width, height] (normalized)
-
         detections = []
 
-        # Remove batch dimension if present
-        if raw_output.ndim == 3:
-            raw_output = raw_output[0]
+        logger.debug(f"Raw output shape: {raw_output.shape}")
 
-        num_classes = len(self.classes)
+        # Handle Hailo NMS output format: (num_classes, 5, max_detections)
+        if raw_output.ndim == 3 and raw_output.shape[1] == 5:
+            num_classes = raw_output.shape[0]
+            max_detections = raw_output.shape[2]
 
-        for detection in raw_output:
-            # Extract box and scores
-            box = detection[:4]
-            scores = detection[4 : 4 + num_classes]
+            for class_id in range(num_classes):
+                class_output = raw_output[class_id]  # Shape: (5, max_detections)
 
-            # Get best class
-            class_id = int(np.argmax(scores))
-            confidence = float(scores[class_id])
+                for det_idx in range(max_detections):
+                    y_min = float(class_output[0, det_idx])
+                    x_min = float(class_output[1, det_idx])
+                    y_max = float(class_output[2, det_idx])
+                    x_max = float(class_output[3, det_idx])
+                    score = float(class_output[4, det_idx])
 
-            # Filter by confidence
-            if confidence < self.confidence_threshold:
-                continue
+                    # Skip empty detections (score = 0 or invalid bbox)
+                    if score < self.confidence_threshold:
+                        continue
 
-            # Convert box format (center to corner)
-            x_center, y_center, width, height = box
-            x = x_center - width / 2
-            y = y_center - height / 2
+                    # Skip invalid boxes
+                    if x_max <= x_min or y_max <= y_min:
+                        continue
 
-            # Get class name
-            class_name = self.classes.get(str(class_id), f"class_{class_id}")
+                    # Get class name from mapping
+                    class_name = self.classes.get(str(class_id), f"class_{class_id}")
 
-            detections.append(
-                Detection(
-                    class_id=class_id,
-                    class_name=class_name,
-                    confidence=confidence,
-                    bbox=BoundingBox(x=x, y=y, width=width, height=height),
-                )
-            )
+                    # Convert to our format (x, y, width, height)
+                    width = x_max - x_min
+                    height = y_max - y_min
 
-        # Apply NMS
-        detections = self._nms(detections)
+                    detections.append(
+                        Detection(
+                            class_id=class_id,
+                            class_name=class_name,
+                            confidence=score,
+                            bbox=BoundingBox(x=x_min, y=y_min, width=width, height=height),
+                        )
+                    )
+        else:
+            # Fallback for other output formats
+            logger.warning(f"Unexpected output shape: {raw_output.shape}, trying generic parse")
+
+        # NMS already applied by Hailo, but sort by confidence
+        detections = sorted(detections, key=lambda d: d.confidence, reverse=True)
 
         return detections
 

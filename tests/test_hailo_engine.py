@@ -77,7 +77,8 @@ class TestHailoEngine:
 
     def test_engine_classes(self, mock_engine):
         """Test engine has correct class mapping."""
-        assert mock_engine.classes == {"0": "cat", "1": "rodent", "2": "bird"}
+        # Default classes use COCO IDs: 15=cat, 14=bird
+        assert mock_engine.classes == {"15": "cat", "14": "bird"}
 
     def test_engine_infer(self, mock_engine, sample_frame):
         """Test inference returns DetectionFrame."""

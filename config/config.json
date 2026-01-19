@@ -15,9 +15,8 @@
     "inference": {
         "model_path": "models/yolov8n_catprey.hef",
         "classes": {
-            "0": "cat",
-            "1": "rodent",
-            "2": "bird"
+            "15": "cat",
+            "14": "bird"
         },
         "thresholds": {
             "cat": 0.55,

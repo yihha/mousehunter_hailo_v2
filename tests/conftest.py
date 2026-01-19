@@ -24,9 +24,9 @@ def sample_bbox():
 
 @pytest.fixture
 def cat_detection(sample_bbox):
-    """A sample cat detection."""
+    """A sample cat detection (COCO class 15)."""
     return Detection(
-        class_id=0,
+        class_id=15,
         class_name="cat",
         confidence=0.85,
         bbox=sample_bbox,
@@ -36,6 +36,7 @@ def cat_detection(sample_bbox):
 @pytest.fixture
 def rodent_detection():
     """A sample rodent detection that overlaps with cat."""
+    # Note: COCO has no rodent class, using custom class 1 for trained model
     return Detection(
         class_id=1,
         class_name="rodent",
@@ -57,9 +58,9 @@ def rodent_far_detection():
 
 @pytest.fixture
 def bird_detection():
-    """A sample bird detection."""
+    """A sample bird detection (COCO class 14)."""
     return Detection(
-        class_id=2,
+        class_id=14,
         class_name="bird",
         confidence=0.85,
         bbox=BoundingBox(x=0.48, y=0.38, width=0.07, height=0.06),

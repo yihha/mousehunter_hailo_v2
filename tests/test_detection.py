@@ -119,7 +119,7 @@ class TestDetection:
 
     def test_detection_creation(self, cat_detection):
         """Test Detection creation."""
-        assert cat_detection.class_id == 0
+        assert cat_detection.class_id == 15  # COCO class ID for cat
         assert cat_detection.class_name == "cat"
         assert cat_detection.confidence == 0.85
         assert cat_detection.bbox is not None
@@ -133,7 +133,7 @@ class TestDetection:
     def test_detection_to_dict(self, cat_detection):
         """Test Detection serialization."""
         d = cat_detection.to_dict()
-        assert d["class_id"] == 0
+        assert d["class_id"] == 15  # COCO class ID for cat
         assert d["class_name"] == "cat"
         assert d["confidence"] == 0.85
         assert "bbox" in d
