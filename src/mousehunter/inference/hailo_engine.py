@@ -303,13 +303,9 @@ class HailoEngine:
         """
         Post-process YOLOv8 output from Hailo NMS.
 
-        The output format from picamera2 Hailo wrapper may be:
-        - dict with layer names as keys
-        - numpy array directly
-        - nested structure
-
-        Hailo's yolov8_nms_postprocess output: (num_classes, 5, max_detections)
-        Each detection: (y_min, x_min, y_max, x_max, score) normalized 0-1
+        The output format from picamera2 Hailo wrapper:
+        - Shape: (num_classes, num_detections, 5)
+        - Each detection: [y_min, x_min, y_max, x_max, score] normalized 0-1
         """
         detections = []
 
@@ -328,20 +324,20 @@ class HailoEngine:
 
         logger.debug(f"Post-process input shape: {raw_output.shape}")
 
-        # Handle Hailo NMS output format: (num_classes, 5, max_detections)
-        if raw_output.ndim == 3 and raw_output.shape[1] == 5:
+        # Handle Hailo NMS output format: (num_classes, num_detections, 5)
+        if raw_output.ndim == 3 and raw_output.shape[2] == 5:
             num_classes = raw_output.shape[0]
-            max_detections = raw_output.shape[2]
+            num_detections = raw_output.shape[1]
 
             for class_id in range(num_classes):
-                class_output = raw_output[class_id]  # Shape: (5, max_detections)
+                class_output = raw_output[class_id]  # Shape: (num_detections, 5)
 
-                for det_idx in range(max_detections):
-                    y_min = float(class_output[0, det_idx])
-                    x_min = float(class_output[1, det_idx])
-                    y_max = float(class_output[2, det_idx])
-                    x_max = float(class_output[3, det_idx])
-                    score = float(class_output[4, det_idx])
+                for det_idx in range(num_detections):
+                    y_min = float(class_output[det_idx, 0])
+                    x_min = float(class_output[det_idx, 1])
+                    y_max = float(class_output[det_idx, 2])
+                    x_max = float(class_output[det_idx, 3])
+                    score = float(class_output[det_idx, 4])
 
                     # Skip empty detections
                     if score < self.confidence_threshold:
