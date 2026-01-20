@@ -247,9 +247,14 @@ class HailoEngine:
             if self._frame_count < 5:
                 if isinstance(raw_output, dict):
                     for k, v in raw_output.items():
-                        logger.info(f"Output {k}: shape={np.array(v).shape}")
+                        if isinstance(v, list):
+                            logger.info(f"Output {k}: list of {len(v)} arrays")
+                        else:
+                            logger.info(f"Output {k}: shape={np.array(v).shape}")
+                elif isinstance(raw_output, list):
+                    logger.info(f"Output: list of {len(raw_output)} class arrays")
                 else:
-                    logger.info(f"Output: type={type(raw_output)}, shape={np.array(raw_output).shape}")
+                    logger.info(f"Output: type={type(raw_output)}")
 
         except Exception as e:
             logger.error(f"Hailo inference error: {e}", exc_info=True)
@@ -303,43 +308,39 @@ class HailoEngine:
         """
         Post-process YOLOv8 output from Hailo NMS.
 
-        The output format from picamera2 Hailo wrapper:
-        - Shape: (num_classes, num_detections, 5)
+        The output format from picamera2 Hailo wrapper is a ragged array:
+        - List of 80 arrays (one per COCO class)
+        - Each array has shape (num_detections_for_class, 5)
         - Each detection: [y_min, x_min, y_max, x_max, score] normalized 0-1
         """
         detections = []
 
-        # Handle different output formats
+        # Handle dict output (get first value)
         if isinstance(raw_output, dict):
-            # Get the first (and usually only) output
             raw_output = list(raw_output.values())[0]
 
-        # Convert to numpy if needed
-        if isinstance(raw_output, list):
-            raw_output = np.array(raw_output)
+        # Handle ragged array: list of per-class detection arrays
+        if isinstance(raw_output, (list, tuple)):
+            for class_id, class_detections in enumerate(raw_output):
+                # Convert to numpy if needed
+                if not isinstance(class_detections, np.ndarray):
+                    class_detections = np.array(class_detections)
 
-        # Squeeze batch dimension if present
-        if raw_output.ndim == 4 and raw_output.shape[0] == 1:
-            raw_output = raw_output[0]
+                # Skip empty classes
+                if class_detections.size == 0:
+                    continue
 
-        logger.debug(f"Post-process input shape: {raw_output.shape}")
+                # Ensure 2D shape (num_detections, 5)
+                if class_detections.ndim == 1:
+                    class_detections = class_detections.reshape(-1, 5)
 
-        # Handle Hailo NMS output format: (num_classes, num_detections, 5)
-        if raw_output.ndim == 3 and raw_output.shape[2] == 5:
-            num_classes = raw_output.shape[0]
-            num_detections = raw_output.shape[1]
+                for det in class_detections:
+                    if len(det) < 5:
+                        continue
 
-            for class_id in range(num_classes):
-                class_output = raw_output[class_id]  # Shape: (num_detections, 5)
+                    y_min, x_min, y_max, x_max, score = det[:5]
 
-                for det_idx in range(num_detections):
-                    y_min = float(class_output[det_idx, 0])
-                    x_min = float(class_output[det_idx, 1])
-                    y_max = float(class_output[det_idx, 2])
-                    x_max = float(class_output[det_idx, 3])
-                    score = float(class_output[det_idx, 4])
-
-                    # Skip empty detections
+                    # Skip low confidence
                     if score < self.confidence_threshold:
                         continue
 
@@ -350,20 +351,21 @@ class HailoEngine:
                     # Get class name from mapping
                     class_name = self.classes.get(str(class_id), f"class_{class_id}")
 
-                    # Convert to our format
-                    width = x_max - x_min
-                    height = y_max - y_min
-
                     detections.append(
                         Detection(
                             class_id=class_id,
                             class_name=class_name,
-                            confidence=score,
-                            bbox=BoundingBox(x=x_min, y=y_min, width=width, height=height),
+                            confidence=float(score),
+                            bbox=BoundingBox(
+                                x=float(x_min),
+                                y=float(y_min),
+                                width=float(x_max - x_min),
+                                height=float(y_max - y_min),
+                            ),
                         )
                     )
         else:
-            logger.warning(f"Unexpected output shape: {raw_output.shape}")
+            logger.warning(f"Unexpected output type: {type(raw_output)}")
 
         # Sort by confidence
         detections = sorted(detections, key=lambda d: d.confidence, reverse=True)
