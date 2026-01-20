@@ -345,8 +345,10 @@ class HailoEngine:
         # Run inference with timeout to prevent system hang if Hailo freezes
         try:
             if self._inference_executor:
+                # Make a copy to ensure data isn't invalidated across thread boundary
+                input_copy = np.copy(input_data)
                 future = self._inference_executor.submit(
-                    self._execute_hailo_pipeline, input_data
+                    self._execute_hailo_pipeline, input_copy
                 )
                 output_dict = future.result(timeout=INFERENCE_TIMEOUT_SECONDS)
             else:
@@ -402,15 +404,18 @@ class HailoEngine:
             f"HAILO INPUT: name={vstream_name}, shape={input_data.shape}, "
             f"dtype={input_data.dtype}, nbytes={input_data.nbytes}, "
             f"contiguous={input_data.flags['C_CONTIGUOUS']}, "
-            f"expected_shape={vstream_info.shape}"
+            f"expected_shape={vstream_info.shape}, "
+            f"data_ptr={input_data.ctypes.data}, owns_data={input_data.flags['OWNDATA']}"
         )
 
         with self._network_group.activate(self._network_group_params):
             with InferVStreams(
                 self._network_group, self._input_params, self._output_params
             ) as pipeline:
+                # Ensure we have a proper contiguous copy for the C++ layer
+                input_data = np.ascontiguousarray(input_data, dtype=np.uint8)
                 input_dict = {vstream_name: input_data}
-                logger.info(f"Calling pipeline.infer with keys: {list(input_dict.keys())}")
+                logger.info(f"Calling pipeline.infer with keys: {list(input_dict.keys())}, data_ptr={input_data.ctypes.data}")
                 return pipeline.infer(input_dict)
 
     def _preprocess(self, frame: np.ndarray) -> np.ndarray:
