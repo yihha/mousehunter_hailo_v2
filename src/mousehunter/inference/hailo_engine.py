@@ -373,16 +373,16 @@ class HailoEngine:
         """Execute the actual Hailo inference pipeline (called from thread pool).
 
         Ensures input is in correct format right before Hailo call:
-        - 3D: (height, width, channels) = (640, 640, 3)
+        - 4D: (batch, height, width, channels) = (1, 640, 640, 3) for NHWC
         - uint8: 1 byte per pixel (model's native format)
         - C-contiguous: for DMA transfer
 
-        Note: InferVStreams handles batch dimension internally.
+        Note: InferVStreams expects 4D input with batch dimension.
         """
         # CRITICAL: Ensure correct format right before Hailo call
-        # Remove batch dimension if present - InferVStreams expects 3D input
-        if len(input_data.shape) == 4 and input_data.shape[0] == 1:
-            input_data = input_data[0]  # (1, H, W, C) -> (H, W, C)
+        # Add batch dimension if not present - InferVStreams expects 4D NHWC input
+        if len(input_data.shape) == 3:
+            input_data = np.expand_dims(input_data, axis=0)  # (H, W, C) -> (1, H, W, C)
 
         if input_data.dtype != np.uint8:
             input_data = input_data.astype(np.uint8)
@@ -418,17 +418,17 @@ class HailoEngine:
 
         Returns:
             Preprocessed tensor: contiguous uint8 array (H, W, C)
-            InferVStreams handles batch dimension internally.
+            Batch dimension is added later in _execute_hailo_pipeline.
         """
-        # Input shape from model: (H, W, C) = (640, 640, 3)
+        # Input shape from model: (H, W, C) = (640, 640, 3) or (N, H, W, C)
         if len(self._input_shape) == 4:
             target_h, target_w = self._input_shape[1], self._input_shape[2]
         else:
             target_h, target_w = self._input_shape[0], self._input_shape[1]
 
-        # Handle 4D input (if batch dim was added upstream)
+        # Handle 4D input (if batch dim was added upstream) - squeeze for processing
         if len(frame.shape) == 4 and frame.shape[0] == 1:
-            frame = frame[0]  # Remove batch dimension
+            frame = frame[0]  # Temporarily remove batch for resize ops
 
         # 1. ENSURE UINT8 - Hailo HEF expects 1 byte per pixel, not float32
         if frame.dtype != np.uint8:
