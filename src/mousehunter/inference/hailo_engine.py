@@ -364,7 +364,11 @@ class HailoEngine:
             return []
 
         # Post-process outputs
+        # Output from InferVStreams is a nested list, convert to numpy array
         raw_output = list(output_dict.values())[0]
+        if isinstance(raw_output, list):
+            # Handle nested list output: list[list[...]] -> numpy array
+            raw_output = np.array(raw_output[0]) if len(raw_output) == 1 else np.array(raw_output)
         detections = self._postprocess_yolo(raw_output, frame.shape[:2])
 
         return detections

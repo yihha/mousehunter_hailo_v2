@@ -103,13 +103,18 @@ def test_hailo_inference():
                     if isinstance(v, list):
                         print(f"      List length: {len(v)}")
                         if len(v) > 0:
-                            print(f"      First element type: {type(v[0])}")
-                            if hasattr(v[0], 'shape'):
-                                print(f"      First element shape: {v[0].shape}, dtype={v[0].dtype}")
+                            first = v[0]
+                            print(f"      First element type: {type(first)}")
+                            # Convert nested list to numpy and show shape
+                            arr = np.array(first) if isinstance(first, list) else first
+                            if hasattr(arr, 'shape'):
+                                print(f"      As numpy array: shape={arr.shape}, dtype={arr.dtype}")
                     elif hasattr(v, 'shape'):
                         print(f"      shape={v.shape}, dtype={v.dtype}")
             except Exception as e:
+                import traceback
                 print(f"  FAILED: {e}")
+                traceback.print_exc()
 
             # Try with explicit batch_size parameter
             print("\n[Test 3] Trying 3D input with batch_size=1...")
