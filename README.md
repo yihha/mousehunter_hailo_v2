@@ -285,6 +285,218 @@ sudo usermod -aG gpio $USER
 - Verify DONGKER antenna placement near cat flap
 - Test with `python -m mousehunter.hardware.jammer`
 
+## Useful Commands
+
+### Service Management
+```bash
+# Start/stop/restart service
+sudo systemctl start mousehunter
+sudo systemctl stop mousehunter
+sudo systemctl restart mousehunter
+
+# Check service status
+sudo systemctl status mousehunter
+
+# View live logs
+journalctl -u mousehunter -f
+
+# View recent logs (last 100 lines)
+journalctl -u mousehunter -n 100
+
+# Enable/disable auto-start on boot
+sudo systemctl enable mousehunter
+sudo systemctl disable mousehunter
+```
+
+### API Endpoints
+```bash
+# Get system status
+curl -s http://localhost:8080/status | python -m json.tool
+
+# Health check
+curl http://localhost:8080/health
+
+# Lock cat flap manually
+curl -X POST http://localhost:8080/jammer/lock
+
+# Unlock cat flap
+curl -X POST http://localhost:8080/jammer/unlock
+
+# Trigger audio deterrent
+curl -X POST http://localhost:8080/audio/scream
+
+# Get camera snapshot
+curl http://localhost:8080/camera/snapshot --output snapshot.jpg
+```
+
+### Manual Testing
+```bash
+# Activate virtual environment
+cd ~/mousehunter_hailo_v2
+source venv/bin/activate
+
+# Test Hailo inference only
+python -c "
+from mousehunter.inference.hailo_engine import HailoEngine
+import numpy as np
+engine = HailoEngine(model_path='models/yolov8n.hef', confidence_threshold=0.5)
+frame = np.random.randint(0, 255, (640, 640, 3), dtype=np.uint8)
+result = engine.infer(frame)
+print(f'Inference: {result.inference_time_ms:.1f}ms')
+engine.cleanup()
+"
+
+# Test camera + Hailo
+python -c "
+from mousehunter.inference.hailo_engine import HailoEngine
+from picamera2 import Picamera2
+picam2 = Picamera2()
+config = picam2.create_preview_configuration(main={'size': (640, 640), 'format': 'RGB888'})
+picam2.configure(config)
+picam2.start()
+engine = HailoEngine(model_path='models/yolov8n.hef', confidence_threshold=0.3)
+for i in range(5):
+    frame = picam2.capture_array()
+    result = engine.infer(frame)
+    print(f'Frame {i+1}: {result.inference_time_ms:.1f}ms, {len(result.detections)} detections')
+picam2.stop()
+engine.cleanup()
+"
+```
+
+### Hardware Diagnostics
+```bash
+# Check Hailo device
+hailortcli fw-control identify
+
+# Check PCIe
+lspci | grep Hailo
+
+# Check camera
+libcamera-hello -t 5000
+
+# Test Hailo with official example
+rpicam-hello -t 5000 --post-process-file /usr/share/rpi-camera-assets/hailo_yolov8_inference.json
+
+# Check GPIO
+pinctrl get 17
+```
+
+## Custom Model Training & Deployment
+
+### Overview
+The default model uses COCO classes (80 classes). For better detection accuracy, you can train a custom YOLOv8n model with your own dataset.
+
+### Custom Model Classes
+Our custom-trained model has 4 classes:
+| Class ID | Name   |
+|----------|--------|
+| 0        | cat    |
+| 1        | rodent |
+| 2        | leaf   |
+| 3        | bird   |
+
+### Step 1: Train Model (Google Colab)
+
+1. Prepare dataset with labeled images (cat, rodent, leaf, bird)
+2. Train YOLOv8n in Google Colab:
+```python
+from ultralytics import YOLO
+
+# Load pretrained YOLOv8n
+model = YOLO('yolov8n.pt')
+
+# Train on custom dataset
+model.train(data='cat_prey_dataset/data.yaml', epochs=100, imgsz=640)
+
+# Best model saved at: runs/detect/train/weights/best.pt
+```
+
+3. Export to ONNX:
+```python
+# Export for Hailo compilation
+!yolo mode=export model="runs/detect/train/weights/best.pt" format=onnx imgsz=640 opset=12
+```
+
+4. Download files from Google Drive:
+   - `yolov8n_catprey_best_YYYYMMDD-HHMMSS.pt` (PyTorch weights)
+   - `yolov8n_catprey_best_YYYYMMDD-HHMMSS.onnx` (ONNX model)
+
+### Step 2: Compile for Hailo-8L
+
+The ONNX model must be compiled to HEF format using Hailo Dataflow Compiler (DFC).
+
+**Option A: Use Hailo Model Zoo (Recommended)**
+```bash
+# On a machine with Hailo DFC installed
+hailo optimize yolov8n_catprey.onnx --hw-arch hailo8l --calib-set /path/to/calibration/images
+hailo compile yolov8n_catprey_optimized.har --hw-arch hailo8l
+```
+
+**Option B: Use Hailo's Docker Container**
+```bash
+# Pull Hailo DFC container
+docker pull hailo/hailo_dfc:latest
+
+# Run compilation
+docker run -v /path/to/models:/models hailo/hailo_dfc \
+    hailo optimize /models/yolov8n_catprey.onnx --hw-arch hailo8l
+```
+
+**Important**: Use `--hw-arch hailo8l` (not `hailo8`) for the 13 TOPS AI HAT+.
+
+### Step 3: Deploy to Raspberry Pi
+
+1. Copy the compiled HEF to the Pi:
+```bash
+scp yolov8n_catprey.hef yi@pi:~/mousehunter_hailo_v2/models/
+```
+
+2. Update `config/config.json`:
+```json
+{
+    "inference": {
+        "model_path": "models/yolov8n_catprey.hef",
+        "confidence_threshold": 0.45,
+        "classes": {
+            "0": "cat",
+            "1": "rodent",
+            "2": "leaf",
+            "3": "bird"
+        }
+    }
+}
+```
+
+3. Restart the service:
+```bash
+sudo systemctl restart mousehunter
+```
+
+### Step 4: Verify Custom Model
+
+```bash
+# Check logs for new class names
+journalctl -u mousehunter -n 50 | grep -i "class\|detection"
+
+# Test inference
+curl -s http://localhost:8080/status | python -m json.tool | grep -A5 classes
+```
+
+### Model Files Location
+
+| File | Location | Description |
+|------|----------|-------------|
+| PyTorch weights | Google Drive: `cat_prey/yolo_v8n_models_custom/` | Training checkpoints |
+| ONNX model | Google Drive: `cat_prey/yolo_v8n_models_custom/` | Intermediate format |
+| HEF model | Pi: `~/mousehunter_hailo_v2/models/` | Compiled for Hailo-8L |
+
+### Current Trained Model
+- **File**: `yolov8n_catprey_best_20260118-203323.onnx`
+- **Classes**: cat (0), rodent (1), leaf (2), bird (3)
+- **Input size**: 640x640
+- **Status**: Needs HEF compilation for Hailo-8L
+
 ## License
 
 MIT License
