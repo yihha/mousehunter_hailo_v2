@@ -1,20 +1,17 @@
 """
 Hailo-8L Inference Engine
 
-Wraps the hailo_platform API for running YOLOv8 inference on the
+Uses the picamera2 Hailo wrapper for running YOLOv8 inference on the
 Raspberry Pi AI HAT+ (Hailo-8L NPU).
 
-The engine provides:
-- HEF model loading and compilation
-- Async inference pipeline
-- YOLO post-processing (NMS, score filtering)
-- Detection result parsing
+The picamera2 Hailo wrapper handles:
+- DMA buffer management
+- Threading (works across threads)
+- Input/output formatting
 """
 
 import logging
-import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -27,24 +24,11 @@ logger = logging.getLogger(__name__)
 
 # Conditional import for development without Hailo hardware
 try:
-    from hailo_platform import (
-        HEF,
-        VDevice,
-        HailoStreamInterface,
-        InferVStreams,
-        ConfigureParams,
-        InputVStreamParams,
-        OutputVStreamParams,
-        FormatType,
-    )
-
+    from picamera2.devices import Hailo
     HAILO_AVAILABLE = True
 except ImportError:
     HAILO_AVAILABLE = False
-    logger.warning("hailo_platform not available - running in simulation mode")
-
-# Inference timeout (seconds) - prevents system hang if Hailo freezes
-INFERENCE_TIMEOUT_SECONDS = 5.0
+    logger.warning("picamera2.devices.Hailo not available - running in simulation mode")
 
 
 class MockHailoInference:
@@ -55,15 +39,11 @@ class MockHailoInference:
         logger.info(f"[MOCK] Hailo model loaded: {model_path}")
 
     def infer(self, frame: np.ndarray) -> list[Detection]:
-        """Generate mock detections with realistic spatial relationships.
-
-        Custom model classes: 0=cat, 1=rodent, 2=leaf, 3=bird
-        """
+        """Generate mock detections with realistic spatial relationships."""
         detections = []
 
         # 15% chance of detecting a cat
         if np.random.random() < 0.15:
-            # Cat position (center-ish)
             cat_x = np.random.uniform(0.25, 0.55)
             cat_y = np.random.uniform(0.25, 0.55)
             cat_w = np.random.uniform(0.15, 0.30)
@@ -71,70 +51,26 @@ class MockHailoInference:
 
             detections.append(
                 Detection(
-                    class_id=0,  # Custom model: cat = 0
+                    class_id=15,  # COCO cat
                     class_name="cat",
                     confidence=np.random.uniform(0.70, 0.98),
                     bbox=BoundingBox(x=cat_x, y=cat_y, width=cat_w, height=cat_h),
                 )
             )
 
-            # 8% chance of also detecting rodent (spatially near cat)
+            # 8% chance of bird near cat
             if np.random.random() < 0.08:
-                # Place rodent near cat's "mouth" area (front of cat box)
-                rodent_x = cat_x + cat_w * np.random.uniform(0.6, 0.9)
-                rodent_y = cat_y + cat_h * np.random.uniform(0.2, 0.5)
-                rodent_w = np.random.uniform(0.04, 0.08)
-                rodent_h = np.random.uniform(0.03, 0.06)
-
+                bird_x = cat_x + cat_w * np.random.uniform(0.3, 0.7)
+                bird_y = cat_y + cat_h * np.random.uniform(0.1, 0.4)
                 detections.append(
                     Detection(
-                        class_id=1,  # Custom model: rodent = 1
-                        class_name="rodent",
+                        class_id=14,  # COCO bird
+                        class_name="bird",
                         confidence=np.random.uniform(0.50, 0.85),
                         bbox=BoundingBox(
-                            x=rodent_x, y=rodent_y, width=rodent_w, height=rodent_h
-                        ),
-                    )
-                )
-
-            # 2% chance of bird (rare, usually not overlapping)
-            elif np.random.random() < 0.02:
-                # Bird might be anywhere, sometimes overlapping
-                if np.random.random() < 0.5:
-                    # Overlapping with cat
-                    bird_x = cat_x + cat_w * np.random.uniform(0.3, 0.7)
-                    bird_y = cat_y + cat_h * np.random.uniform(0.1, 0.4)
-                else:
-                    # Random position (might not overlap)
-                    bird_x = np.random.uniform(0.1, 0.7)
-                    bird_y = np.random.uniform(0.1, 0.7)
-
-                detections.append(
-                    Detection(
-                        class_id=3,  # Custom model: bird = 3
-                        class_name="bird",
-                        confidence=np.random.uniform(0.40, 0.75),
-                        bbox=BoundingBox(
-                            x=bird_x,
-                            y=bird_y,
+                            x=bird_x, y=bird_y,
                             width=np.random.uniform(0.05, 0.10),
                             height=np.random.uniform(0.04, 0.08),
-                        ),
-                    )
-                )
-
-            # 3% chance of leaf (false positive that should be ignored)
-            elif np.random.random() < 0.03:
-                detections.append(
-                    Detection(
-                        class_id=2,  # Custom model: leaf = 2
-                        class_name="leaf",
-                        confidence=np.random.uniform(0.40, 0.70),
-                        bbox=BoundingBox(
-                            x=np.random.uniform(0.1, 0.8),
-                            y=np.random.uniform(0.1, 0.8),
-                            width=np.random.uniform(0.03, 0.08),
-                            height=np.random.uniform(0.02, 0.06),
                         ),
                     )
                 )
@@ -149,12 +85,10 @@ class HailoEngine:
     """
     Hailo-8L inference engine for YOLOv8 object detection.
 
-    Loads a compiled HEF model and runs inference on the NPU.
-    Provides YOLO-specific post-processing including NMS.
-
-    IMPORTANT: Hailo resources are initialized lazily on first inference.
-    This is required because Hailo objects cannot be used across threads -
-    they must be created in the same thread that will use them.
+    Uses the picamera2 Hailo wrapper which properly handles:
+    - DMA buffer management
+    - Cross-thread usage
+    - Input/output formatting
     """
 
     def __init__(
@@ -172,112 +106,63 @@ class HailoEngine:
             model_path: Path to compiled HEF model
             confidence_threshold: Minimum confidence for detections
             nms_iou_threshold: IoU threshold for NMS
-            classes: Class ID to name mapping (e.g., {"0": "cat", "1": "prey"})
-            force_mock: Force mock mode even if Hailo hardware is available (for testing)
+            classes: Class ID to name mapping (e.g., {"15": "cat", "14": "bird"})
+            force_mock: Force mock mode even if Hailo hardware is available
         """
         self.model_path = Path(model_path)
         self.confidence_threshold = confidence_threshold
         self.nms_iou_threshold = nms_iou_threshold
-        # Default to COCO classes for standard yolov8n.hef
-        # For custom model, pass classes={"0": "cat", "1": "rodent", "2": "leaf", "3": "bird"}
         self.classes = classes or {"15": "cat", "14": "bird"}
         self._force_mock = force_mock
         self._use_hailo = HAILO_AVAILABLE and not force_mock
 
         # State
         self._initialized = False
-        self._hailo_initialized = False  # Separate flag for lazy Hailo init
+        self._hailo: Hailo | None = None
+        self._input_shape: tuple | None = None
         self._frame_count = 0
         self._total_inference_time = 0.0
-        self._timeout_count = 0  # Track inference timeouts
-
-        # Thread pool - NOT USED for Hailo (cross-thread doesn't work)
-        self._inference_executor: ThreadPoolExecutor | None = None
 
         # Callbacks for detection events
         self._detection_callbacks: list[Callable[[DetectionFrame], None]] = []
 
-        # For mock mode, initialize immediately
-        if not self._use_hailo:
+        # Initialize
+        if self._use_hailo:
+            self._init_hailo()
+        else:
             self._mock_engine = MockHailoInference(str(model_path))
             self._initialized = True
             if force_mock:
-                logger.info("Hailo engine running in forced mock mode (for testing)")
-        else:
-            # Hailo init is LAZY - will happen on first inference in the calling thread
-            # This is required because Hailo objects cannot be used across threads
-            logger.info(
-                f"HailoEngine created (lazy init): model={model_path}, "
-                f"threshold={confidence_threshold}"
-            )
-            self._initialized = True  # Mark as ready (actual Hailo init is lazy)
+                logger.info("Hailo engine running in forced mock mode")
 
         logger.info(
             f"HailoEngine initialized: model={model_path}, "
             f"threshold={confidence_threshold}, hailo={self._use_hailo}"
         )
 
-    def _ensure_hailo_initialized(self) -> None:
-        """Ensure Hailo is initialized in the current thread.
-
-        Hailo objects (VDevice, network_group, etc.) cannot be used across threads.
-        This method initializes them lazily on first use in the calling thread.
-        """
-        if self._hailo_initialized:
-            return
-
-        logger.info(f"Lazy-initializing Hailo in thread: {threading.current_thread().name}")
-        self._init_hailo()
-        self._hailo_initialized = True
-
     def _init_hailo(self) -> None:
-        """Initialize Hailo device and load model."""
+        """Initialize Hailo using picamera2 wrapper."""
         if not self.model_path.exists():
             raise FileNotFoundError(f"Model not found: {self.model_path}")
 
         try:
-            # Load HEF file
-            self._hef = HEF(str(self.model_path))
+            # Create Hailo instance using picamera2 wrapper
+            # This handles all the complex DMA/buffer management internally
+            self._hailo = Hailo(str(self.model_path))
 
-            # Get model info
-            self._input_vstream_infos = self._hef.get_input_vstream_infos()
-            self._output_vstream_infos = self._hef.get_output_vstream_infos()
-
-            # Log model details
-            for info in self._input_vstream_infos:
-                logger.info(f"Input: {info.name}, shape={info.shape}")
-            for info in self._output_vstream_infos:
-                logger.info(f"Output: {info.name}, shape={info.shape}")
-
-            # Get expected input shape
-            self._input_shape = self._input_vstream_infos[0].shape
-            self._input_name = self._input_vstream_infos[0].name
+            # Get input shape
+            self._input_shape = self._hailo.get_input_shape()
             logger.info(f"Model input shape: {self._input_shape}")
 
-            # Create virtual device
-            self._vdevice = VDevice()
-
-            # Configure network
-            configure_params = ConfigureParams.create_from_hef(
-                self._hef, interface=HailoStreamInterface.PCIe
-            )
-            self._network_group = self._vdevice.configure(self._hef, configure_params)[0]
-
-            # Create network group params for activation
-            self._network_group_params = self._network_group.create_params()
-
-            # Create input/output vstream params
-            # quantized=True: We're providing data in the model's native format (UINT8)
-            # The model expects raw 0-255 pixel values, not normalized floats
-            self._input_params = InputVStreamParams.make(
-                self._network_group, quantized=True, format_type=FormatType.UINT8
-            )
-            self._output_params = OutputVStreamParams.make(
-                self._network_group, quantized=False, format_type=FormatType.FLOAT32
-            )
+            # Get model info
+            inputs, outputs = self._hailo.describe()
+            for name, shape, fmt in inputs:
+                logger.info(f"Input: {name}, shape={shape}, format={fmt}")
+            for name, shape, fmt in outputs:
+                logger.info(f"Output: {name}, shape={shape}, format={fmt}")
 
             self._initialized = True
-            logger.info("Hailo device initialized successfully")
+            logger.info("Hailo device initialized successfully (picamera2 wrapper)")
 
         except Exception as e:
             logger.error(f"Failed to initialize Hailo: {e}")
@@ -288,7 +173,7 @@ class HailoEngine:
         Run inference on a single frame.
 
         Args:
-            frame: Input image as numpy array (RGB, HWC format)
+            frame: Input image as numpy array (RGB, HWC format, 640x640x3)
 
         Returns:
             DetectionFrame with all detections
@@ -309,8 +194,7 @@ class HailoEngine:
         # Log raw frame info for first few frames
         if self._frame_count < 5:
             logger.info(
-                f"Raw frame: shape={frame.shape}, dtype={frame.dtype}, "
-                f"contiguous={frame.flags['C_CONTIGUOUS']}"
+                f"Raw frame: shape={frame.shape}, dtype={frame.dtype}"
             )
 
         start_time = time.perf_counter()
@@ -344,112 +228,37 @@ class HailoEngine:
         return result
 
     def _run_hailo_inference(self, frame: np.ndarray) -> list[Detection]:
-        """Run inference on Hailo hardware with timeout protection."""
+        """Run inference using picamera2 Hailo wrapper."""
         # Preprocess frame
         input_data = self._preprocess(frame)
 
         # Debug: Log input details for first few frames
         if self._frame_count < 5:
             logger.info(
-                f"Hailo input: shape={input_data.shape}, dtype={input_data.dtype}, "
-                f"contiguous={input_data.flags['C_CONTIGUOUS']}, nbytes={input_data.nbytes}"
+                f"Hailo input: shape={input_data.shape}, dtype={input_data.dtype}"
             )
-
-        # Validate input before sending to Hailo
-        # 3D array: (640, 640, 3) = 1,228,800 bytes for uint8
-        expected_bytes = 640 * 640 * 3  # 1,228,800 for uint8
-        if input_data.nbytes != expected_bytes:
-            logger.error(
-                f"Input size mismatch! Expected {expected_bytes} bytes, "
-                f"got {input_data.nbytes}. Shape: {input_data.shape}, dtype: {input_data.dtype}"
-            )
-            return []
-
-        # Run inference with timeout to prevent system hang if Hailo freezes
-        # DEBUG: Bypass executor to test if threading is the issue
-        USE_EXECUTOR = False  # Set to True to use ThreadPoolExecutor
 
         try:
-            if USE_EXECUTOR and self._inference_executor:
-                # Make a copy to ensure data isn't invalidated across thread boundary
-                input_copy = np.copy(input_data)
-                future = self._inference_executor.submit(
-                    self._execute_hailo_pipeline, input_copy
-                )
-                output_dict = future.result(timeout=INFERENCE_TIMEOUT_SECONDS)
-            else:
-                # Run directly without executor (for debugging threading issues)
-                output_dict = self._execute_hailo_pipeline(input_data)
-        except FuturesTimeoutError:
-            self._timeout_count += 1
-            logger.error(
-                f"Hailo inference timeout after {INFERENCE_TIMEOUT_SECONDS}s! "
-                f"(total timeouts: {self._timeout_count})"
-            )
-            return []  # Return empty detections on timeout
+            # Run inference using picamera2 Hailo wrapper
+            # This is much simpler - just pass the frame!
+            raw_output = self._hailo.run(input_data)
+
+            # Log output format for debugging
+            if self._frame_count < 5:
+                if isinstance(raw_output, dict):
+                    for k, v in raw_output.items():
+                        logger.info(f"Output {k}: shape={np.array(v).shape}")
+                else:
+                    logger.info(f"Output: type={type(raw_output)}, shape={np.array(raw_output).shape}")
+
         except Exception as e:
             logger.error(f"Hailo inference error: {e}", exc_info=True)
             return []
 
         # Post-process outputs
-        # Output from InferVStreams is a nested list, convert to numpy array
-        raw_output = list(output_dict.values())[0]
-        if isinstance(raw_output, list):
-            # Handle nested list output: list[list[...]] -> numpy array
-            raw_output = np.array(raw_output[0]) if len(raw_output) == 1 else np.array(raw_output)
         detections = self._postprocess_yolo(raw_output, frame.shape[:2])
 
         return detections
-
-    def _execute_hailo_pipeline(self, input_data: np.ndarray) -> dict:
-        """Execute the actual Hailo inference pipeline.
-
-        Ensures input is in correct format right before Hailo call:
-        - 4D: (batch, height, width, channels) = (1, 640, 640, 3) for NHWC
-        - uint8: 1 byte per pixel (model's native format)
-        - C-contiguous: for DMA transfer
-
-        Note: InferVStreams expects 4D input with batch dimension.
-        Note: Hailo is lazily initialized on first call to ensure it's in the correct thread.
-        """
-        # CRITICAL: Lazy init Hailo in the calling thread (cross-thread usage doesn't work)
-        self._ensure_hailo_initialized()
-
-        # CRITICAL: Ensure correct format right before Hailo call
-        # Add batch dimension if not present - InferVStreams expects 4D NHWC input
-        if len(input_data.shape) == 3:
-            input_data = np.expand_dims(input_data, axis=0)  # (H, W, C) -> (1, H, W, C)
-
-        if input_data.dtype != np.uint8:
-            input_data = input_data.astype(np.uint8)
-
-        # CRITICAL: Force a copy that OWNS its data
-        # Camera frames and views don't own their data, which causes Hailo C++ layer to fail
-        # np.array() with copy=True ensures we have a contiguous array that owns its memory
-        input_data = np.array(input_data, dtype=np.uint8, copy=True, order='C')
-
-        # Get the official input name from network config
-        vstream_info = self._network_group.get_input_vstream_infos()[0]
-        vstream_name = vstream_info.name
-
-        # DEBUG: Log exactly what we're sending
-        logger.info(
-            f"HAILO INPUT: name={vstream_name}, shape={input_data.shape}, "
-            f"dtype={input_data.dtype}, nbytes={input_data.nbytes}, "
-            f"contiguous={input_data.flags['C_CONTIGUOUS']}, "
-            f"expected_shape={vstream_info.shape}, "
-            f"data_ptr={input_data.ctypes.data}, owns_data={input_data.flags['OWNDATA']}"
-        )
-
-        with self._network_group.activate(self._network_group_params):
-            with InferVStreams(
-                self._network_group, self._input_params, self._output_params
-            ) as pipeline:
-                # Ensure we have a proper contiguous copy for the C++ layer
-                input_data = np.ascontiguousarray(input_data, dtype=np.uint8)
-                input_dict = {vstream_name: input_data}
-                logger.info(f"Calling pipeline.infer with keys: {list(input_dict.keys())}, data_ptr={input_data.ctypes.data}")
-                return pipeline.infer(input_dict)
 
     def _preprocess(self, frame: np.ndarray) -> np.ndarray:
         """
@@ -459,61 +268,65 @@ class HailoEngine:
             frame: Input RGB image (HWC), uint8 or float
 
         Returns:
-            Preprocessed tensor: contiguous uint8 array (H, W, C)
-            Batch dimension is added later in _execute_hailo_pipeline.
+            Preprocessed tensor: uint8 array matching model input shape
         """
-        # Input shape from model: (H, W, C) = (640, 640, 3) or (N, H, W, C)
-        if len(self._input_shape) == 4:
-            target_h, target_w = self._input_shape[1], self._input_shape[2]
+        # Get target dimensions from model
+        if self._input_shape:
+            if len(self._input_shape) == 4:
+                target_h, target_w = self._input_shape[1], self._input_shape[2]
+            else:
+                target_h, target_w = self._input_shape[0], self._input_shape[1]
         else:
-            target_h, target_w = self._input_shape[0], self._input_shape[1]
+            target_h, target_w = 640, 640
 
-        # Handle 4D input (if batch dim was added upstream) - squeeze for processing
+        # Handle 4D input
         if len(frame.shape) == 4 and frame.shape[0] == 1:
-            frame = frame[0]  # Temporarily remove batch for resize ops
+            frame = frame[0]
 
-        # 1. ENSURE UINT8 - Hailo HEF expects 1 byte per pixel, not float32
+        # Ensure uint8
         if frame.dtype != np.uint8:
-            # Handle normalized floats (0-1 range) by scaling back to 0-255
             if frame.dtype in (np.float32, np.float64) and frame.max() <= 1.0:
                 frame = (frame * 255).astype(np.uint8)
             else:
                 frame = np.clip(frame, 0, 255).astype(np.uint8)
 
-        # 2. Resize if needed
+        # Resize if needed
         if frame.shape[0] != target_h or frame.shape[1] != target_w:
             from PIL import Image
-
             img = Image.fromarray(frame)
             img = img.resize((target_w, target_h), Image.BILINEAR)
             frame = np.array(img, dtype=np.uint8)
 
-        # 3. ENSURE CONTIGUOUS - Critical for Hailo DMA transfers
-        frame = np.ascontiguousarray(frame)
-
         return frame
 
-    def _postprocess_yolo(
-        self, raw_output: np.ndarray, original_shape: tuple[int, int]
-    ) -> list[Detection]:
+    def _postprocess_yolo(self, raw_output, original_shape: tuple[int, int]) -> list[Detection]:
         """
         Post-process YOLOv8 output from Hailo NMS.
 
-        Hailo's yolov8_nms_postprocess output format: (num_classes, 5, max_detections)
-        - num_classes: 80 for COCO
-        - 5: (y_min, x_min, y_max, x_max, score) normalized 0-1
-        - max_detections: 100 per class
+        The output format from picamera2 Hailo wrapper may be:
+        - dict with layer names as keys
+        - numpy array directly
+        - nested structure
 
-        Args:
-            raw_output: Raw network output from Hailo NMS
-            original_shape: Original image (H, W) - not used, coords are normalized
-
-        Returns:
-            List of Detection objects
+        Hailo's yolov8_nms_postprocess output: (num_classes, 5, max_detections)
+        Each detection: (y_min, x_min, y_max, x_max, score) normalized 0-1
         """
         detections = []
 
-        logger.debug(f"Raw output shape: {raw_output.shape}")
+        # Handle different output formats
+        if isinstance(raw_output, dict):
+            # Get the first (and usually only) output
+            raw_output = list(raw_output.values())[0]
+
+        # Convert to numpy if needed
+        if isinstance(raw_output, list):
+            raw_output = np.array(raw_output)
+
+        # Squeeze batch dimension if present
+        if raw_output.ndim == 4 and raw_output.shape[0] == 1:
+            raw_output = raw_output[0]
+
+        logger.debug(f"Post-process input shape: {raw_output.shape}")
 
         # Handle Hailo NMS output format: (num_classes, 5, max_detections)
         if raw_output.ndim == 3 and raw_output.shape[1] == 5:
@@ -530,7 +343,7 @@ class HailoEngine:
                     x_max = float(class_output[3, det_idx])
                     score = float(class_output[4, det_idx])
 
-                    # Skip empty detections (score = 0 or invalid bbox)
+                    # Skip empty detections
                     if score < self.confidence_threshold:
                         continue
 
@@ -541,7 +354,7 @@ class HailoEngine:
                     # Get class name from mapping
                     class_name = self.classes.get(str(class_id), f"class_{class_id}")
 
-                    # Convert to our format (x, y, width, height)
+                    # Convert to our format
                     width = x_max - x_min
                     height = y_max - y_min
 
@@ -554,36 +367,12 @@ class HailoEngine:
                         )
                     )
         else:
-            # Fallback for other output formats
-            logger.warning(f"Unexpected output shape: {raw_output.shape}, trying generic parse")
+            logger.warning(f"Unexpected output shape: {raw_output.shape}")
 
-        # NMS already applied by Hailo, but sort by confidence
+        # Sort by confidence
         detections = sorted(detections, key=lambda d: d.confidence, reverse=True)
 
         return detections
-
-    def _nms(self, detections: list[Detection]) -> list[Detection]:
-        """Apply Non-Maximum Suppression."""
-        if not detections:
-            return []
-
-        # Sort by confidence (descending)
-        detections = sorted(detections, key=lambda d: d.confidence, reverse=True)
-
-        kept = []
-        while detections:
-            best = detections.pop(0)
-            kept.append(best)
-
-            # Remove overlapping detections of same class
-            detections = [
-                d
-                for d in detections
-                if d.class_id != best.class_id
-                or d.bbox.iou(best.bbox) < self.nms_iou_threshold
-            ]
-
-        return kept
 
     def on_detection(self, callback: Callable[[DetectionFrame], None]) -> None:
         """Register callback for detection events."""
@@ -615,41 +404,17 @@ class HailoEngine:
             "estimated_fps": self.fps,
             "hailo_available": HAILO_AVAILABLE,
             "using_hailo": self._use_hailo,
-            "timeout_count": self._timeout_count,
             "classes": self.classes,
         }
 
     def cleanup(self) -> None:
         """Release Hailo resources."""
-        # Shutdown thread pool executor first
-        # Use wait=False initially to avoid blocking if a future is stuck
-        # cancel_futures=False to let running inference complete gracefully
-        if self._inference_executor:
+        if self._hailo:
             try:
-                # Give running tasks a chance to complete (non-blocking check)
-                self._inference_executor.shutdown(wait=False, cancel_futures=False)
-                # Now wait with a timeout for clean shutdown
-                import time
-                shutdown_start = time.time()
-                while time.time() - shutdown_start < 3.0:  # 3 second timeout
-                    # Check if executor threads are done
-                    if not any(t.is_alive() for t in self._inference_executor._threads):
-                        break
-                    time.sleep(0.1)
-                else:
-                    logger.warning("Inference executor did not shutdown cleanly within 3s")
+                self._hailo.close()
             except Exception as e:
-                logger.error(f"Error shutting down inference executor: {e}")
-            finally:
-                self._inference_executor = None
-
-        if self._use_hailo and self._initialized:
-            try:
-                del self._network_group
-                del self._vdevice
-                del self._hef
-            except Exception as e:
-                logger.error(f"Error cleaning up Hailo: {e}")
+                logger.error(f"Error closing Hailo: {e}")
+            self._hailo = None
         elif hasattr(self, "_mock_engine"):
             self._mock_engine.cleanup()
 
@@ -674,7 +439,7 @@ def _create_default_engine() -> HailoEngine:
         )
     except ImportError:
         logger.warning("Config not available, using defaults")
-        return HailoEngine(model_path="models/yolov8n_catprey.hef")
+        return HailoEngine(model_path="models/yolov8n.hef")
 
 
 # Global instance (lazy)
@@ -692,11 +457,11 @@ def get_hailo_engine() -> HailoEngine:
 def test_engine() -> None:
     """Test the inference engine."""
     logging.basicConfig(level=logging.INFO)
-    print("=== Hailo Engine Test ===")
+    print("=== Hailo Engine Test (picamera2 wrapper) ===")
     print(f"Hailo Available: {HAILO_AVAILABLE}")
 
     engine = HailoEngine(
-        model_path="models/yolov8n_catprey.hef",
+        model_path="models/yolov8n.hef",
         confidence_threshold=0.5,
     )
 
