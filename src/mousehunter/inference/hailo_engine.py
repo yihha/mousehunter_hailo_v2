@@ -347,26 +347,27 @@ class HailoEngine:
         Preprocess frame for YOLO inference.
 
         Args:
-            frame: Input RGB image (HWC), uint8
+            frame: Input RGB image (HWC), uint8 or float
 
         Returns:
-            Preprocessed tensor matching model input shape with batch dimension, uint8
-            (Hailo quantized models handle normalization internally)
+            Preprocessed tensor: contiguous uint8 array with batch dimension (1, H, W, C)
+            (Hailo quantized models expect raw 0-255 pixel values)
         """
         # Input shape may be (H, W, C) or (batch, H, W, C)
-        # Handle both cases
         if len(self._input_shape) == 4:
-            # Shape is (batch, H, W, C)
             target_h, target_w = self._input_shape[1], self._input_shape[2]
         else:
-            # Shape is (H, W, C)
             target_h, target_w = self._input_shape[0], self._input_shape[1]
 
-        # Ensure frame is uint8
+        # 1. ENSURE UINT8 - Hailo HEF expects 1 byte per pixel, not float32
         if frame.dtype != np.uint8:
-            frame = np.clip(frame, 0, 255).astype(np.uint8)
+            # Handle normalized floats (0-1 range) by scaling back to 0-255
+            if frame.dtype in (np.float32, np.float64) and frame.max() <= 1.0:
+                frame = (frame * 255).astype(np.uint8)
+            else:
+                frame = np.clip(frame, 0, 255).astype(np.uint8)
 
-        # Resize if needed
+        # 2. Resize if needed
         if frame.shape[0] != target_h or frame.shape[1] != target_w:
             from PIL import Image
 
@@ -374,8 +375,12 @@ class HailoEngine:
             img = img.resize((target_w, target_h), Image.BILINEAR)
             frame = np.array(img, dtype=np.uint8)
 
-        # Hailo InferVStreams expects batch dimension: (batch, H, W, C)
-        frame = np.expand_dims(frame, axis=0)
+        # 3. ENSURE 4D - Add batch dimension: (H, W, C) -> (1, H, W, C)
+        if len(frame.shape) == 3:
+            frame = np.expand_dims(frame, axis=0)
+
+        # 4. ENSURE CONTIGUOUS - Critical for Hailo DMA transfers
+        frame = np.ascontiguousarray(frame)
 
         return frame
 
