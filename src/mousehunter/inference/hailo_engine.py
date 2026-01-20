@@ -12,6 +12,7 @@ The engine provides:
 """
 
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime
@@ -150,6 +151,10 @@ class HailoEngine:
 
     Loads a compiled HEF model and runs inference on the NPU.
     Provides YOLO-specific post-processing including NMS.
+
+    IMPORTANT: Hailo resources are initialized lazily on first inference.
+    This is required because Hailo objects cannot be used across threads -
+    they must be created in the same thread that will use them.
     """
 
     def __init__(
@@ -181,31 +186,49 @@ class HailoEngine:
 
         # State
         self._initialized = False
+        self._hailo_initialized = False  # Separate flag for lazy Hailo init
         self._frame_count = 0
         self._total_inference_time = 0.0
         self._timeout_count = 0  # Track inference timeouts
 
-        # Thread pool for timeout-protected inference
+        # Thread pool - NOT USED for Hailo (cross-thread doesn't work)
         self._inference_executor: ThreadPoolExecutor | None = None
 
         # Callbacks for detection events
         self._detection_callbacks: list[Callable[[DetectionFrame], None]] = []
 
-        # Initialize engine
-        if self._use_hailo:
-            self._init_hailo()
-            # Create executor for timeout protection (single thread to serialize Hailo access)
-            self._inference_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hailo")
-        else:
+        # For mock mode, initialize immediately
+        if not self._use_hailo:
             self._mock_engine = MockHailoInference(str(model_path))
             self._initialized = True
             if force_mock:
                 logger.info("Hailo engine running in forced mock mode (for testing)")
+        else:
+            # Hailo init is LAZY - will happen on first inference in the calling thread
+            # This is required because Hailo objects cannot be used across threads
+            logger.info(
+                f"HailoEngine created (lazy init): model={model_path}, "
+                f"threshold={confidence_threshold}"
+            )
+            self._initialized = True  # Mark as ready (actual Hailo init is lazy)
 
         logger.info(
             f"HailoEngine initialized: model={model_path}, "
             f"threshold={confidence_threshold}, hailo={self._use_hailo}"
         )
+
+    def _ensure_hailo_initialized(self) -> None:
+        """Ensure Hailo is initialized in the current thread.
+
+        Hailo objects (VDevice, network_group, etc.) cannot be used across threads.
+        This method initializes them lazily on first use in the calling thread.
+        """
+        if self._hailo_initialized:
+            return
+
+        logger.info(f"Lazy-initializing Hailo in thread: {threading.current_thread().name}")
+        self._init_hailo()
+        self._hailo_initialized = True
 
     def _init_hailo(self) -> None:
         """Initialize Hailo device and load model."""
@@ -379,7 +402,7 @@ class HailoEngine:
         return detections
 
     def _execute_hailo_pipeline(self, input_data: np.ndarray) -> dict:
-        """Execute the actual Hailo inference pipeline (called from thread pool).
+        """Execute the actual Hailo inference pipeline.
 
         Ensures input is in correct format right before Hailo call:
         - 4D: (batch, height, width, channels) = (1, 640, 640, 3) for NHWC
@@ -387,7 +410,11 @@ class HailoEngine:
         - C-contiguous: for DMA transfer
 
         Note: InferVStreams expects 4D input with batch dimension.
+        Note: Hailo is lazily initialized on first call to ensure it's in the correct thread.
         """
+        # CRITICAL: Lazy init Hailo in the calling thread (cross-thread usage doesn't work)
+        self._ensure_hailo_initialized()
+
         # CRITICAL: Ensure correct format right before Hailo call
         # Add batch dimension if not present - InferVStreams expects 4D NHWC input
         if len(input_data.shape) == 3:
