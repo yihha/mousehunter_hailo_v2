@@ -271,6 +271,23 @@ class HailoEngine:
         if not self._initialized:
             raise RuntimeError("Engine not initialized")
 
+        # Validate input frame
+        if frame is None or frame.size == 0:
+            logger.error("Received empty or None frame")
+            return DetectionFrame(
+                timestamp=datetime.now(),
+                detections=[],
+                frame_number=self._frame_count,
+                inference_time_ms=0.0,
+            )
+
+        # Log raw frame info for first few frames
+        if self._frame_count < 5:
+            logger.info(
+                f"Raw frame: shape={frame.shape}, dtype={frame.dtype}, "
+                f"contiguous={frame.flags['C_CONTIGUOUS']}"
+            )
+
         start_time = time.perf_counter()
         timestamp = datetime.now()
 
@@ -305,6 +322,22 @@ class HailoEngine:
         """Run inference on Hailo hardware with timeout protection."""
         # Preprocess frame
         input_data = self._preprocess(frame)
+
+        # Debug: Log input details for first few frames
+        if self._frame_count < 5:
+            logger.info(
+                f"Hailo input: shape={input_data.shape}, dtype={input_data.dtype}, "
+                f"contiguous={input_data.flags['C_CONTIGUOUS']}, nbytes={input_data.nbytes}"
+            )
+
+        # Validate input before sending to Hailo
+        expected_bytes = 1 * 640 * 640 * 3  # 1,228,800 for uint8
+        if input_data.nbytes != expected_bytes:
+            logger.error(
+                f"Input size mismatch! Expected {expected_bytes} bytes, "
+                f"got {input_data.nbytes}. Shape: {input_data.shape}, dtype: {input_data.dtype}"
+            )
+            return []
 
         # Run inference with timeout to prevent system hang if Hailo freezes
         try:
