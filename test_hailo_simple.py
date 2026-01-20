@@ -99,7 +99,15 @@ def test_hailo_inference():
                 result = pipeline.infer(input_dict)
                 print(f"  SUCCESS! Output keys: {list(result.keys())}")
                 for k, v in result.items():
-                    print(f"    {k}: shape={v.shape}, dtype={v.dtype}")
+                    print(f"    {k}: type={type(v)}")
+                    if isinstance(v, list):
+                        print(f"      List length: {len(v)}")
+                        if len(v) > 0:
+                            print(f"      First element type: {type(v[0])}")
+                            if hasattr(v[0], 'shape'):
+                                print(f"      First element shape: {v[0].shape}, dtype={v[0].dtype}")
+                    elif hasattr(v, 'shape'):
+                        print(f"      shape={v.shape}, dtype={v.dtype}")
             except Exception as e:
                 print(f"  FAILED: {e}")
 
