@@ -244,8 +244,10 @@ class HailoEngine:
             self._network_group_params = self._network_group.create_params()
 
             # Create input/output vstream params
+            # quantized=True: We're providing data in the model's native format (UINT8)
+            # The model expects raw 0-255 pixel values, not normalized floats
             self._input_params = InputVStreamParams.make(
-                self._network_group, quantized=False, format_type=FormatType.UINT8
+                self._network_group, quantized=True, format_type=FormatType.UINT8
             )
             self._output_params = OutputVStreamParams.make(
                 self._network_group, quantized=False, format_type=FormatType.FLOAT32
@@ -331,7 +333,8 @@ class HailoEngine:
             )
 
         # Validate input before sending to Hailo
-        expected_bytes = 1 * 640 * 640 * 3  # 1,228,800 for uint8
+        # 3D array: (640, 640, 3) = 1,228,800 bytes for uint8
+        expected_bytes = 640 * 640 * 3  # 1,228,800 for uint8
         if input_data.nbytes != expected_bytes:
             logger.error(
                 f"Input size mismatch! Expected {expected_bytes} bytes, "
@@ -370,13 +373,16 @@ class HailoEngine:
         """Execute the actual Hailo inference pipeline (called from thread pool).
 
         Ensures input is in correct format right before Hailo call:
-        - 4D: (batch, height, width, channels) = (1, 640, 640, 3)
-        - uint8: 1 byte per pixel
+        - 3D: (height, width, channels) = (640, 640, 3)
+        - uint8: 1 byte per pixel (model's native format)
         - C-contiguous: for DMA transfer
+
+        Note: InferVStreams handles batch dimension internally.
         """
         # CRITICAL: Ensure correct format right before Hailo call
-        if len(input_data.shape) == 3:
-            input_data = np.expand_dims(input_data, axis=0)
+        # Remove batch dimension if present - InferVStreams expects 3D input
+        if len(input_data.shape) == 4 and input_data.shape[0] == 1:
+            input_data = input_data[0]  # (1, H, W, C) -> (H, W, C)
 
         if input_data.dtype != np.uint8:
             input_data = input_data.astype(np.uint8)
@@ -411,14 +417,18 @@ class HailoEngine:
             frame: Input RGB image (HWC), uint8 or float
 
         Returns:
-            Preprocessed tensor: contiguous uint8 array with batch dimension (1, H, W, C)
-            (Hailo quantized models expect raw 0-255 pixel values)
+            Preprocessed tensor: contiguous uint8 array (H, W, C)
+            InferVStreams handles batch dimension internally.
         """
-        # Input shape may be (H, W, C) or (batch, H, W, C)
+        # Input shape from model: (H, W, C) = (640, 640, 3)
         if len(self._input_shape) == 4:
             target_h, target_w = self._input_shape[1], self._input_shape[2]
         else:
             target_h, target_w = self._input_shape[0], self._input_shape[1]
+
+        # Handle 4D input (if batch dim was added upstream)
+        if len(frame.shape) == 4 and frame.shape[0] == 1:
+            frame = frame[0]  # Remove batch dimension
 
         # 1. ENSURE UINT8 - Hailo HEF expects 1 byte per pixel, not float32
         if frame.dtype != np.uint8:
@@ -436,11 +446,7 @@ class HailoEngine:
             img = img.resize((target_w, target_h), Image.BILINEAR)
             frame = np.array(img, dtype=np.uint8)
 
-        # 3. ENSURE 4D - Add batch dimension: (H, W, C) -> (1, H, W, C)
-        if len(frame.shape) == 3:
-            frame = np.expand_dims(frame, axis=0)
-
-        # 4. ENSURE CONTIGUOUS - Critical for Hailo DMA transfers
+        # 3. ENSURE CONTIGUOUS - Critical for Hailo DMA transfers
         frame = np.ascontiguousarray(frame)
 
         return frame
