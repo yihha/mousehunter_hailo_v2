@@ -367,12 +367,31 @@ class HailoEngine:
         return detections
 
     def _execute_hailo_pipeline(self, input_data: np.ndarray) -> dict:
-        """Execute the actual Hailo inference pipeline (called from thread pool)."""
+        """Execute the actual Hailo inference pipeline (called from thread pool).
+
+        Ensures input is in correct format right before Hailo call:
+        - 4D: (batch, height, width, channels) = (1, 640, 640, 3)
+        - uint8: 1 byte per pixel
+        - C-contiguous: for DMA transfer
+        """
+        # CRITICAL: Ensure correct format right before Hailo call
+        # This fixes "got 0" error caused by batch dimension issues
+        if len(input_data.shape) == 3:
+            input_data = np.expand_dims(input_data, axis=0)
+
+        if input_data.dtype != np.uint8:
+            input_data = input_data.astype(np.uint8)
+
+        input_data = np.ascontiguousarray(input_data)
+
+        # Get the official input name from network config
+        vstream_name = self._network_group.get_input_vstream_infos()[0].name
+
         with self._network_group.activate(self._network_group_params):
             with InferVStreams(
                 self._network_group, self._input_params, self._output_params
             ) as pipeline:
-                input_dict = {self._input_name: input_data}
+                input_dict = {vstream_name: input_data}
                 return pipeline.infer(input_dict)
 
     def _preprocess(self, frame: np.ndarray) -> np.ndarray:
