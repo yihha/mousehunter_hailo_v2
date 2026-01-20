@@ -375,7 +375,6 @@ class HailoEngine:
         - C-contiguous: for DMA transfer
         """
         # CRITICAL: Ensure correct format right before Hailo call
-        # This fixes "got 0" error caused by batch dimension issues
         if len(input_data.shape) == 3:
             input_data = np.expand_dims(input_data, axis=0)
 
@@ -385,13 +384,23 @@ class HailoEngine:
         input_data = np.ascontiguousarray(input_data)
 
         # Get the official input name from network config
-        vstream_name = self._network_group.get_input_vstream_infos()[0].name
+        vstream_info = self._network_group.get_input_vstream_infos()[0]
+        vstream_name = vstream_info.name
+
+        # DEBUG: Log exactly what we're sending
+        logger.info(
+            f"HAILO INPUT: name={vstream_name}, shape={input_data.shape}, "
+            f"dtype={input_data.dtype}, nbytes={input_data.nbytes}, "
+            f"contiguous={input_data.flags['C_CONTIGUOUS']}, "
+            f"expected_shape={vstream_info.shape}"
+        )
 
         with self._network_group.activate(self._network_group_params):
             with InferVStreams(
                 self._network_group, self._input_params, self._output_params
             ) as pipeline:
                 input_dict = {vstream_name: input_data}
+                logger.info(f"Calling pipeline.infer with keys: {list(input_dict.keys())}")
                 return pipeline.infer(input_dict)
 
     def _preprocess(self, frame: np.ndarray) -> np.ndarray:
