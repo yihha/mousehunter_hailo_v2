@@ -350,11 +350,17 @@ class HailoEngine:
             frame: Input RGB image (HWC), uint8
 
         Returns:
-            Preprocessed tensor matching model input shape, uint8
+            Preprocessed tensor matching model input shape with batch dimension, uint8
             (Hailo quantized models handle normalization internally)
         """
-        # Input shape is (H, W, C) = (640, 640, 3)
-        target_h, target_w = self._input_shape[0], self._input_shape[1]
+        # Input shape may be (H, W, C) or (batch, H, W, C)
+        # Handle both cases
+        if len(self._input_shape) == 4:
+            # Shape is (batch, H, W, C)
+            target_h, target_w = self._input_shape[1], self._input_shape[2]
+        else:
+            # Shape is (H, W, C)
+            target_h, target_w = self._input_shape[0], self._input_shape[1]
 
         # Ensure frame is uint8
         if frame.dtype != np.uint8:
@@ -368,8 +374,9 @@ class HailoEngine:
             img = img.resize((target_w, target_h), Image.BILINEAR)
             frame = np.array(img, dtype=np.uint8)
 
-        # Hailo expects uint8 input - quantization is handled by the HEF model
-        # Shape: (H, W, C) without batch dimension for InferVStreams
+        # Hailo InferVStreams expects batch dimension: (batch, H, W, C)
+        frame = np.expand_dims(frame, axis=0)
+
         return frame
 
     def _postprocess_yolo(
