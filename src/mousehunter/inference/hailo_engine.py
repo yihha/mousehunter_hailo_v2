@@ -343,8 +343,11 @@ class HailoEngine:
             return []
 
         # Run inference with timeout to prevent system hang if Hailo freezes
+        # DEBUG: Bypass executor to test if threading is the issue
+        USE_EXECUTOR = False  # Set to True to use ThreadPoolExecutor
+
         try:
-            if self._inference_executor:
+            if USE_EXECUTOR and self._inference_executor:
                 # Make a copy to ensure data isn't invalidated across thread boundary
                 input_copy = np.copy(input_data)
                 future = self._inference_executor.submit(
@@ -352,7 +355,7 @@ class HailoEngine:
                 )
                 output_dict = future.result(timeout=INFERENCE_TIMEOUT_SECONDS)
             else:
-                # Fallback without timeout (shouldn't happen in normal operation)
+                # Run directly without executor (for debugging threading issues)
                 output_dict = self._execute_hailo_pipeline(input_data)
         except FuturesTimeoutError:
             self._timeout_count += 1
