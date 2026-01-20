@@ -396,7 +396,10 @@ class HailoEngine:
         if input_data.dtype != np.uint8:
             input_data = input_data.astype(np.uint8)
 
-        input_data = np.ascontiguousarray(input_data)
+        # CRITICAL: Force a copy that OWNS its data
+        # Camera frames and views don't own their data, which causes Hailo C++ layer to fail
+        # np.array() with copy=True ensures we have a contiguous array that owns its memory
+        input_data = np.array(input_data, dtype=np.uint8, copy=True, order='C')
 
         # Get the official input name from network config
         vstream_info = self._network_group.get_input_vstream_infos()[0]
