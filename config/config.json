@@ -69,5 +69,16 @@
         "output_dir": "runtime/recordings",
         "evidence_dir": "runtime/evidence",
         "max_age_days": 7
+    },
+    "cloud_storage": {
+        "enabled": false,
+        "rclone_remote": "",
+        "remote_path": "MouseHunter",
+        "upload_after_detection": true,
+        "sync_interval_minutes": 60,
+        "delete_local_after_upload": false,
+        "retention_days_cloud": 365,
+        "bandwidth_limit": "",
+        "_setup_instructions": "Run 'rclone config' to create a remote, then set rclone_remote to the remote name (e.g., 'gdrive')"
     }
 }

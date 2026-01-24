@@ -58,6 +58,7 @@ class MouseHunterController:
         self._camera = None
         self._detector = None
         self._telegram = None
+        self._cloud_storage = None
 
         # Detection thread
         self._detection_thread: threading.Thread | None = None
@@ -151,6 +152,20 @@ class MouseHunterController:
             )
             self._background_tasks.append(task)
             logger.info(f"API server task started on {api_config.host}:{api_config.port}")
+
+        # Start cloud storage periodic sync if enabled
+        if self._cloud_storage and self._cloud_storage.enabled:
+            from mousehunter.config import cloud_storage_config
+
+            if cloud_storage_config.sync_interval_minutes > 0:
+                task = asyncio.create_task(
+                    self._cloud_sync_loop(cloud_storage_config.sync_interval_minutes),
+                    name="cloud_sync",
+                )
+                self._background_tasks.append(task)
+                logger.info(
+                    f"Cloud sync task started (interval: {cloud_storage_config.sync_interval_minutes}min)"
+                )
 
         # Start detection pipeline in background thread
         self._start_detection_thread()
@@ -274,6 +289,26 @@ class MouseHunterController:
         except Exception as e:
             logger.error(f"Failed to initialize Telegram: {e}")
 
+        # Cloud Storage
+        try:
+            from mousehunter.storage.cloud_storage import CloudStorage
+            from mousehunter.config import cloud_storage_config, recording_config
+
+            if cloud_storage_config.enabled:
+                self._cloud_storage = CloudStorage(
+                    rclone_remote=cloud_storage_config.rclone_remote,
+                    remote_path=cloud_storage_config.remote_path,
+                    evidence_dir=recording_config.evidence_dir,
+                    enabled=cloud_storage_config.enabled,
+                    delete_local_after_upload=cloud_storage_config.delete_local_after_upload,
+                    retention_days_local=recording_config.max_age_days,
+                    retention_days_cloud=cloud_storage_config.retention_days_cloud,
+                    bandwidth_limit=cloud_storage_config.bandwidth_limit,
+                )
+                logger.info("Cloud storage initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize cloud storage: {e}")
+
     def _setup_signal_handlers(self) -> None:
         """Setup signal handlers for graceful shutdown."""
 
@@ -379,6 +414,7 @@ class MouseHunterController:
                 logger.error(f"Failed to encode evidence image: {e}")
 
         # Save evidence to disk
+        evidence_path = None
         if self._camera:
             try:
                 evidence_path = self._camera.trigger_evidence_save(
@@ -395,6 +431,20 @@ class MouseHunterController:
             return
 
         if self._main_loop:
+            # Schedule cloud upload (async, non-blocking)
+            if self._cloud_storage and evidence_path:
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        self._cloud_storage.upload_evidence(
+                            evidence_path,
+                            prey_type=event.prey_detection.class_name,
+                            confidence=event.prey_detection.confidence,
+                            cat_confidence=event.cat_detection.confidence,
+                        ),
+                        self._main_loop,
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to schedule cloud upload: {e}")
             try:
                 future = asyncio.run_coroutine_threadsafe(
                     self._execute_lockdown(image_bytes), self._main_loop
@@ -447,6 +497,31 @@ class MouseHunterController:
                 await self._telegram.send_alert(message, image_bytes, include_buttons=True)
             except Exception as e:
                 logger.error(f"Failed to send alert: {e}")
+
+    async def _cloud_sync_loop(self, interval_minutes: int) -> None:
+        """Periodic cloud sync and local cleanup loop."""
+        while self._running:
+            try:
+                await asyncio.sleep(interval_minutes * 60)
+
+                if self._cloud_storage:
+                    # Sync any pending uploads
+                    logger.info("Running periodic cloud sync...")
+                    results = await self._cloud_storage.sync_all()
+                    if results:
+                        success = sum(1 for v in results.values() if v)
+                        logger.info(f"Cloud sync: {success}/{len(results)} folders uploaded")
+
+                    # Cleanup old local files
+                    deleted = self._cloud_storage.cleanup_local()
+                    if deleted > 0:
+                        logger.info(f"Local cleanup: {deleted} folders deleted")
+
+            except asyncio.CancelledError:
+                logger.debug("Cloud sync loop cancelled")
+                break
+            except Exception as e:
+                logger.error(f"Cloud sync error: {e}")
 
     async def _state_machine_tick(self) -> None:
         """Periodic state machine update."""

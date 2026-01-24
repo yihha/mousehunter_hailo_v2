@@ -309,6 +309,45 @@ class RecordingConfig(BaseSettings):
     )
 
 
+class CloudStorageConfig(BaseSettings):
+    """Cloud storage configuration for long-term archival via rclone."""
+
+    model_config = {"env_prefix": "MOUSEHUNTER_CLOUD_"}
+
+    enabled: bool = Field(
+        default=_json_config.get("cloud_storage", {}).get("enabled", False),
+        description="Enable cloud storage uploads",
+    )
+    rclone_remote: str = Field(
+        default=_json_config.get("cloud_storage", {}).get("rclone_remote", ""),
+        description="rclone remote name (e.g., 'gdrive', 'dropbox')",
+    )
+    remote_path: str = Field(
+        default=_json_config.get("cloud_storage", {}).get("remote_path", "MouseHunter"),
+        description="Base path on remote storage",
+    )
+    upload_after_detection: bool = Field(
+        default=_json_config.get("cloud_storage", {}).get("upload_after_detection", True),
+        description="Automatically upload evidence after each detection",
+    )
+    sync_interval_minutes: int = Field(
+        default=_json_config.get("cloud_storage", {}).get("sync_interval_minutes", 60),
+        description="Periodic sync interval (0 to disable)",
+    )
+    delete_local_after_upload: bool = Field(
+        default=_json_config.get("cloud_storage", {}).get("delete_local_after_upload", False),
+        description="Delete local files after successful upload",
+    )
+    retention_days_cloud: int = Field(
+        default=_json_config.get("cloud_storage", {}).get("retention_days_cloud", 365),
+        description="Days to keep files in cloud storage (0 for forever)",
+    )
+    bandwidth_limit: str = Field(
+        default=_json_config.get("cloud_storage", {}).get("bandwidth_limit", ""),
+        description="Bandwidth limit for uploads (e.g., '1M' for 1MB/s, empty for unlimited)",
+    )
+
+
 # Global configuration instances
 telegram_config = TelegramConfig()
 camera_config = CameraConfig()
@@ -318,6 +357,7 @@ audio_config = AudioConfig()
 api_config = APIConfig()
 logging_config = LoggingConfig()
 recording_config = RecordingConfig()
+cloud_storage_config = CloudStorageConfig()
 
 
 def setup_logging() -> None:

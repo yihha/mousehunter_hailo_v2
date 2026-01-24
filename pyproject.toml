@@ -64,6 +64,7 @@ dev = [
 [project.scripts]
 mousehunter = "mousehunter.main:main"
 mousehunter-test-hardware = "mousehunter.hardware.jammer:test_jammer"
+mousehunter-test-cloud = "mousehunter.storage.cloud_storage:test_cloud_storage_sync"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
