@@ -307,7 +307,9 @@ def test_jammer() -> None:
     print("=== Jammer Hardware Test ===")
     print(f"GPIO Available: {GPIO_AVAILABLE}")
 
-    j = Jammer(pin=17, active_high=True, max_on_duration=10.0)
+    # Load from config instead of hardcoding
+    j = _create_default_jammer()
+    print(f"Loaded from config: GPIO pin={j.pin}, active_high={j.active_high}, max_duration={j.max_on_duration}s")
 
     try:
         input("Press Enter to ACTIVATE jammer (block cat flap)...")
