@@ -540,15 +540,32 @@ async def test_bot() -> None:
     print("=== Telegram Bot Test ===")
     print(f"Telegram Available: {TELEGRAM_AVAILABLE}")
 
-    bot = TelegramBot(
-        bot_token=os.getenv("MOUSEHUNTER_TELEGRAM_BOT_TOKEN", "test_token"),
-        chat_id=os.getenv("MOUSEHUNTER_TELEGRAM_CHAT_ID", "12345"),
-        enabled=True,
-    )
+    # Load from config instead of hardcoding
+    bot = _create_default_bot()
+
+    # Display loaded config (mask token for security)
+    token_masked = bot.bot_token[:8] + "..." + bot.bot_token[-4:] if len(bot.bot_token) > 12 else "***"
+    print(f"Loaded from config: chat_id={bot.chat_id}, token={token_masked}, enabled={bot.enabled}")
+
+    if not bot.bot_token or bot.bot_token == "":
+        print("ERROR: No bot token configured. Please set telegram.bot_token in config/config.json")
+        return
+
+    if not bot.chat_id or bot.chat_id == "":
+        print("ERROR: No chat_id configured. Please set telegram.chat_id in config/config.json")
+        return
 
     await bot.start()
 
-    print("Bot running... Press Ctrl+C to stop")
+    # Send a test message to verify connection
+    print("Sending test message...")
+    try:
+        await bot.send_message("🧪 MouseHunter Telegram bot test - connection successful!")
+        print("✓ Test message sent successfully!")
+    except Exception as e:
+        print(f"✗ Failed to send test message: {e}")
+
+    print("\nBot running for 30 seconds (test commands like /status)... Press Ctrl+C to stop")
     try:
         await asyncio.sleep(30)
     except KeyboardInterrupt:
