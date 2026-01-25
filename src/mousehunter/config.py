@@ -2,8 +2,9 @@
 Configuration management for MouseHunter using Pydantic settings.
 
 Loads configuration from:
-1. config/config.json (defaults)
-2. Environment variables (override with MOUSEHUNTER_ prefix)
+1. .env file (if present)
+2. config/config.json (defaults)
+3. Environment variables (override with MOUSEHUNTER_ prefix)
 """
 
 import json
@@ -11,6 +12,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
@@ -20,6 +22,12 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 CONFIG_DIR = PROJECT_ROOT / "config"
 RUNTIME_DIR = PROJECT_ROOT / "runtime"
+
+# Load .env file from project root (if exists)
+_env_file = PROJECT_ROOT / ".env"
+if _env_file.exists():
+    load_dotenv(_env_file)
+    logger.debug(f"Loaded environment from {_env_file}")
 
 
 def load_json_config() -> dict[str, Any]:
