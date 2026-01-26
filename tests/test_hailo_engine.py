@@ -254,7 +254,7 @@ class TestHailoHardware:
 
         # Find the model file
         project_root = Path(__file__).parent.parent
-        model_path = project_root / "models" / "yolov8n.hef"
+        model_path = project_root / "models" / "yolov8n_catprey.hef"
 
         if not model_path.exists():
             pytest.skip(f"Model not found: {model_path}")

@@ -16,7 +16,7 @@ from hailo_platform import (
     FormatType,
 )
 
-MODEL_PATH = Path("models/yolov8n.hef")
+MODEL_PATH = Path("models/yolov8n_catprey.hef")
 
 
 def run_inference_in_current_thread():

@@ -5,7 +5,7 @@ import numpy as np
 from hailo_platform import HEF, VDevice, HailoStreamInterface, ConfigureParams, InferVStreams, InputVStreamParams, OutputVStreamParams, FormatType
 
 # Load model
-hef = HEF("models/yolov8n.hef")
+hef = HEF("models/yolov8n_catprey.hef")
 print(f"Loaded HEF: {hef.get_input_vstream_infos()[0].name}, shape={hef.get_input_vstream_infos()[0].shape}")
 
 # Setup device

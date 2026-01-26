@@ -444,7 +444,7 @@ def _create_default_engine() -> HailoEngine:
         )
     except ImportError:
         logger.warning("Config not available, using defaults")
-        return HailoEngine(model_path="models/yolov8n.hef")
+        return HailoEngine(model_path="models/yolov8n_catprey.hef")
 
 
 # Global instance (lazy)
@@ -465,10 +465,8 @@ def test_engine() -> None:
     print("=== Hailo Engine Test (picamera2 wrapper) ===")
     print(f"Hailo Available: {HAILO_AVAILABLE}")
 
-    engine = HailoEngine(
-        model_path="models/yolov8n.hef",
-        confidence_threshold=0.5,
-    )
+    # Use config-based model path
+    engine = _create_default_engine()
 
     # Generate test frame
     test_frame = np.random.randint(0, 255, (640, 640, 3), dtype=np.uint8)
