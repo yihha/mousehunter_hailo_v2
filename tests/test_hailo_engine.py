@@ -77,8 +77,8 @@ class TestHailoEngine:
 
     def test_engine_classes(self, mock_engine):
         """Test engine has correct class mapping."""
-        # Default classes use custom model IDs: 0=cat, 1=rodent, 2=leaf, 3=bird
-        assert mock_engine.classes == {"0": "cat", "1": "rodent", "2": "leaf", "3": "bird"}
+        # Default classes use custom model IDs: 0=bird, 1=cat, 2=leaf, 3=rodent
+        assert mock_engine.classes == {"0": "bird", "1": "cat", "2": "leaf", "3": "rodent"}
 
     def test_engine_infer(self, mock_engine, sample_frame):
         """Test inference returns DetectionFrame."""
@@ -165,13 +165,13 @@ class TestHailoEngineNMS:
         """Test NMS removes overlapping detections of same class."""
         detections = [
             Detection(
-                class_id=0,
+                class_id=1,
                 class_name="cat",
                 confidence=0.9,
                 bbox=BoundingBox(x=0.3, y=0.3, width=0.2, height=0.2),
             ),
             Detection(
-                class_id=0,
+                class_id=1,
                 class_name="cat",
                 confidence=0.7,  # Lower confidence, overlapping
                 bbox=BoundingBox(x=0.32, y=0.32, width=0.2, height=0.2),
@@ -186,13 +186,13 @@ class TestHailoEngineNMS:
         """Test NMS keeps detections of different classes."""
         detections = [
             Detection(
-                class_id=0,
+                class_id=1,
                 class_name="cat",
                 confidence=0.9,
                 bbox=BoundingBox(x=0.3, y=0.3, width=0.2, height=0.2),
             ),
             Detection(
-                class_id=1,
+                class_id=3,
                 class_name="rodent",
                 confidence=0.7,
                 bbox=BoundingBox(x=0.32, y=0.32, width=0.1, height=0.1),
@@ -206,13 +206,13 @@ class TestHailoEngineNMS:
         """Test NMS keeps non-overlapping detections of same class."""
         detections = [
             Detection(
-                class_id=0,
+                class_id=1,
                 class_name="cat",
                 confidence=0.9,
                 bbox=BoundingBox(x=0.1, y=0.1, width=0.2, height=0.2),
             ),
             Detection(
-                class_id=0,
+                class_id=1,
                 class_name="cat",
                 confidence=0.8,
                 bbox=BoundingBox(x=0.7, y=0.7, width=0.2, height=0.2),  # Far apart
@@ -262,7 +262,7 @@ class TestHailoHardware:
         engine = HailoEngine(
             model_path=model_path,
             confidence_threshold=0.5,
-            classes={"15": "cat", "14": "bird"},
+            classes={"0": "bird", "1": "cat", "2": "leaf", "3": "rodent"},
             force_mock=False,  # Use real Hailo
         )
 

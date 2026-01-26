@@ -22,14 +22,14 @@ class TestSpatialValidation:
     def test_check_spatial_match_direct_overlap(self, prey_detector):
         """Test spatial match with directly overlapping boxes."""
         cat = Detection(
-            class_id=0,
+            class_id=1,
             class_name="cat",
             confidence=0.85,
             bbox=BoundingBox(x=0.3, y=0.3, width=0.25, height=0.25),
         )
         # Rodent overlaps with cat
         rodent = Detection(
-            class_id=1,
+            class_id=3,
             class_name="rodent",
             confidence=0.65,
             bbox=BoundingBox(x=0.45, y=0.40, width=0.08, height=0.06),
@@ -44,7 +44,7 @@ class TestSpatialValidation:
     def test_check_spatial_match_proximity(self, prey_detector):
         """Test spatial match via proximity (prey center in expanded cat box)."""
         cat = Detection(
-            class_id=0,
+            class_id=1,
             class_name="cat",
             confidence=0.85,
             bbox=BoundingBox(x=0.3, y=0.3, width=0.2, height=0.2),  # 0.3-0.5
@@ -52,7 +52,7 @@ class TestSpatialValidation:
         # Cat expanded by 25%: width 0.25, so x from 0.275 to 0.525
         # Rodent fully outside cat box (starts at 0.51), but center (0.52) within expanded (0.525)
         rodent = Detection(
-            class_id=1,
+            class_id=3,
             class_name="rodent",
             confidence=0.65,
             bbox=BoundingBox(x=0.51, y=0.38, width=0.02, height=0.02),  # center at 0.52, 0.39
@@ -65,14 +65,14 @@ class TestSpatialValidation:
     def test_check_spatial_match_no_match(self, prey_detector):
         """Test no spatial match when prey is far from cat."""
         cat = Detection(
-            class_id=0,
+            class_id=1,
             class_name="cat",
             confidence=0.85,
             bbox=BoundingBox(x=0.1, y=0.1, width=0.2, height=0.2),
         )
         # Rodent far away
         rodent = Detection(
-            class_id=1,
+            class_id=3,
             class_name="rodent",
             confidence=0.65,
             bbox=BoundingBox(x=0.8, y=0.8, width=0.05, height=0.04),
@@ -84,14 +84,14 @@ class TestSpatialValidation:
     def test_spatial_validation_disabled(self, prey_detector_no_spatial):
         """Test that spatial validation can be disabled."""
         cat = Detection(
-            class_id=0,
+            class_id=1,
             class_name="cat",
             confidence=0.85,
             bbox=BoundingBox(x=0.1, y=0.1, width=0.2, height=0.2),
         )
         # Rodent far away - would fail spatial validation
         rodent = Detection(
-            class_id=1,
+            class_id=3,
             class_name="rodent",
             confidence=0.65,
             bbox=BoundingBox(x=0.8, y=0.8, width=0.05, height=0.04),
@@ -115,7 +115,7 @@ class TestFrameEvaluation:
     def test_evaluate_frame_no_cat(self, prey_detector):
         """Test frame with no cat detection."""
         rodent = Detection(
-            class_id=1,
+            class_id=3,
             class_name="rodent",
             confidence=0.65,
             bbox=BoundingBox(x=0.4, y=0.4, width=0.05, height=0.04),
@@ -148,13 +148,13 @@ class TestFrameEvaluation:
     def test_evaluate_frame_cat_and_valid_rodent(self, prey_detector):
         """Test frame with cat and spatially valid rodent."""
         cat = Detection(
-            class_id=0,
+            class_id=1,
             class_name="cat",
             confidence=0.85,
             bbox=BoundingBox(x=0.3, y=0.3, width=0.25, height=0.25),
         )
         rodent = Detection(
-            class_id=1,
+            class_id=3,
             class_name="rodent",
             confidence=0.65,
             bbox=BoundingBox(x=0.45, y=0.40, width=0.08, height=0.06),
@@ -176,13 +176,13 @@ class TestFrameEvaluation:
     def test_evaluate_frame_cat_and_invalid_rodent(self, prey_detector):
         """Test frame with cat and spatially invalid rodent."""
         cat = Detection(
-            class_id=0,
+            class_id=1,
             class_name="cat",
             confidence=0.85,
             bbox=BoundingBox(x=0.1, y=0.1, width=0.2, height=0.2),
         )
         rodent = Detection(
-            class_id=1,
+            class_id=3,
             class_name="rodent",
             confidence=0.65,
             bbox=BoundingBox(x=0.8, y=0.8, width=0.05, height=0.04),
@@ -202,14 +202,14 @@ class TestFrameEvaluation:
     def test_evaluate_frame_bird_high_confidence(self, prey_detector):
         """Test bird detection requires high confidence (0.80)."""
         cat = Detection(
-            class_id=0,
+            class_id=1,
             class_name="cat",
             confidence=0.85,
             bbox=BoundingBox(x=0.3, y=0.3, width=0.25, height=0.25),
         )
         # Bird with low confidence (below 0.80 threshold)
         bird_low = Detection(
-            class_id=2,
+            class_id=0,
             class_name="bird",
             confidence=0.70,
             bbox=BoundingBox(x=0.45, y=0.40, width=0.08, height=0.06),
@@ -227,7 +227,7 @@ class TestFrameEvaluation:
 
         # Bird with high confidence
         bird_high = Detection(
-            class_id=2,
+            class_id=0,
             class_name="bird",
             confidence=0.85,
             bbox=BoundingBox(x=0.45, y=0.40, width=0.08, height=0.06),
@@ -372,7 +372,7 @@ class TestThresholds:
         """Test detection above threshold is returned."""
         detections = [
             Detection(
-                class_id=0,
+                class_id=1,
                 class_name="cat",
                 confidence=0.60,
                 bbox=BoundingBox(x=0.3, y=0.3, width=0.2, height=0.2),
@@ -387,7 +387,7 @@ class TestThresholds:
         """Test detection below threshold is not returned."""
         detections = [
             Detection(
-                class_id=0,
+                class_id=1,
                 class_name="cat",
                 confidence=0.40,  # Below 0.55 threshold
                 bbox=BoundingBox(x=0.3, y=0.3, width=0.2, height=0.2),
@@ -401,13 +401,13 @@ class TestThresholds:
         """Test highest confidence detection is returned."""
         detections = [
             Detection(
-                class_id=1,
+                class_id=3,
                 class_name="rodent",
                 confidence=0.50,
                 bbox=BoundingBox(x=0.3, y=0.3, width=0.05, height=0.04),
             ),
             Detection(
-                class_id=1,
+                class_id=3,
                 class_name="rodent",
                 confidence=0.75,
                 bbox=BoundingBox(x=0.5, y=0.5, width=0.05, height=0.04),

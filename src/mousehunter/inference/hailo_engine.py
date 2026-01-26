@@ -113,13 +113,13 @@ class HailoEngine:
             model_path: Path to compiled HEF model
             confidence_threshold: Minimum confidence for detections
             nms_iou_threshold: IoU threshold for NMS
-            classes: Class ID to name mapping (e.g., {"15": "cat", "14": "bird"})
+            classes: Class ID to name mapping (e.g., {"0": "bird", "1": "cat", "2": "leaf", "3": "rodent"})
             force_mock: Force mock mode even if Hailo hardware is available
         """
         self.model_path = Path(model_path)
         self.confidence_threshold = confidence_threshold
         self.nms_iou_threshold = nms_iou_threshold
-        self.classes = classes or {"15": "cat", "14": "bird"}
+        self.classes = classes or {"0": "bird", "1": "cat", "2": "leaf", "3": "rodent"}
         self._force_mock = force_mock
         self._use_hailo = HAILO_AVAILABLE and not force_mock
 
@@ -316,7 +316,7 @@ class HailoEngine:
         Post-process YOLOv8 output from Hailo NMS.
 
         The output format from picamera2 Hailo wrapper is a ragged array:
-        - List of 80 arrays (one per COCO class)
+        - List of N arrays (one per class, N=4 for custom model, 80 for COCO)
         - Each array has shape (num_detections_for_class, 5)
         - Each detection: [y_min, x_min, y_max, x_max, score] normalized 0-1
         """

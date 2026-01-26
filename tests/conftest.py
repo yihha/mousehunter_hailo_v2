@@ -24,9 +24,9 @@ def sample_bbox():
 
 @pytest.fixture
 def cat_detection(sample_bbox):
-    """A sample cat detection (custom model class 0)."""
+    """A sample cat detection (custom model class 1)."""
     return Detection(
-        class_id=0,
+        class_id=1,
         class_name="cat",
         confidence=0.85,
         bbox=sample_bbox,
@@ -35,10 +35,9 @@ def cat_detection(sample_bbox):
 
 @pytest.fixture
 def rodent_detection():
-    """A sample rodent detection that overlaps with cat."""
-    # Note: COCO has no rodent class, using custom class 1 for trained model
+    """A sample rodent detection that overlaps with cat (custom model class 3)."""
     return Detection(
-        class_id=1,
+        class_id=3,
         class_name="rodent",
         confidence=0.65,
         bbox=BoundingBox(x=0.45, y=0.35, width=0.06, height=0.05),
@@ -47,9 +46,9 @@ def rodent_detection():
 
 @pytest.fixture
 def rodent_far_detection():
-    """A rodent detection far from cat (no overlap)."""
+    """A rodent detection far from cat (no overlap, custom model class 3)."""
     return Detection(
-        class_id=1,
+        class_id=3,
         class_name="rodent",
         confidence=0.70,
         bbox=BoundingBox(x=0.8, y=0.8, width=0.05, height=0.04),
@@ -58,9 +57,9 @@ def rodent_far_detection():
 
 @pytest.fixture
 def bird_detection():
-    """A sample bird detection (custom model class 3)."""
+    """A sample bird detection (custom model class 0)."""
     return Detection(
-        class_id=3,
+        class_id=0,
         class_name="bird",
         confidence=0.85,
         bbox=BoundingBox(x=0.48, y=0.38, width=0.07, height=0.06),
@@ -73,7 +72,7 @@ def mock_engine():
     return HailoEngine(
         model_path="models/yolov8n_catprey.hef",
         confidence_threshold=0.5,
-        classes={"0": "cat", "1": "rodent", "2": "leaf", "3": "bird"},
+        classes={"0": "bird", "1": "cat", "2": "leaf", "3": "rodent"},
         force_mock=True,  # Ensures tests run in mock mode even on Pi with Hailo
     )
 
@@ -83,7 +82,7 @@ def prey_detector(mock_engine):
     """Create a PreyDetector with mock engine."""
     return PreyDetector(
         engine=mock_engine,
-        thresholds={"cat": 0.55, "rodent": 0.45, "bird": 0.80},
+        thresholds={"cat": 0.55, "rodent": 0.45, "bird": 0.80, "leaf": 0.90},
         window_size=5,
         trigger_count=3,
         spatial_validation_enabled=True,
@@ -96,7 +95,7 @@ def prey_detector_no_spatial(mock_engine):
     """Create a PreyDetector with spatial validation disabled."""
     return PreyDetector(
         engine=mock_engine,
-        thresholds={"cat": 0.55, "rodent": 0.45, "bird": 0.80},
+        thresholds={"cat": 0.55, "rodent": 0.45, "bird": 0.80, "leaf": 0.90},
         window_size=5,
         trigger_count=3,
         spatial_validation_enabled=False,
