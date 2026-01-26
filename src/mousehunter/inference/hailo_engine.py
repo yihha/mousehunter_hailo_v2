@@ -438,29 +438,31 @@ class HailoEngine:
             return detections
 
         # Try to identify box and class tensors by shape
+        # YOLOv8 custom model outputs:
+        #   - Box regression (DFL): (H, W, 64) where 64 = 4 * 16 bins
+        #   - Class scores: (H, W, num_classes)
         box_tensors = []
         class_tensors = []
 
         for t in tensors:
             if t.ndim < 2:
                 continue
-            # Box tensors have 64 channels (4 * 16 DFL bins) or 4 channels
-            # Class tensors have num_classes channels
             last_dim = t.shape[-1]
-            if last_dim == 64 or last_dim == 4:
+
+            # DFL box regression is always 64 channels
+            if last_dim == 64:
                 box_tensors.append(t)
+            # Class scores have num_classes channels
             elif last_dim == num_classes:
                 class_tensors.append(t)
-            else:
-                # Might be combined format
-                if last_dim == 64 + num_classes or last_dim == 4 + num_classes:
-                    # Split into box and class
-                    if last_dim > 64:
-                        box_tensors.append(t[..., :64])
-                        class_tensors.append(t[..., 64:])
-                    else:
-                        box_tensors.append(t[..., :4])
-                        class_tensors.append(t[..., 4:])
+            # Combined format (box + class)
+            elif last_dim == 64 + num_classes:
+                box_tensors.append(t[..., :64])
+                class_tensors.append(t[..., 64:])
+            elif last_dim == 4 + num_classes:
+                # Direct xywh + class format
+                box_tensors.append(t[..., :4])
+                class_tensors.append(t[..., 4:])
 
         if not class_tensors:
             logger.warning("Could not identify class score tensors")
