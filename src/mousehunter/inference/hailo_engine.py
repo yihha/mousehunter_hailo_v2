@@ -51,24 +51,31 @@ class MockHailoInference:
 
             detections.append(
                 Detection(
-                    class_id=15,  # COCO cat
+                    class_id=1,  # Custom model: cat
                     class_name="cat",
                     confidence=np.random.uniform(0.70, 0.98),
                     bbox=BoundingBox(x=cat_x, y=cat_y, width=cat_w, height=cat_h),
                 )
             )
 
-            # 8% chance of bird near cat
+            # 8% chance of prey near cat (bird or rodent)
             if np.random.random() < 0.08:
-                bird_x = cat_x + cat_w * np.random.uniform(0.3, 0.7)
-                bird_y = cat_y + cat_h * np.random.uniform(0.1, 0.4)
+                prey_x = cat_x + cat_w * np.random.uniform(0.3, 0.7)
+                prey_y = cat_y + cat_h * np.random.uniform(0.1, 0.4)
+                # 50/50 chance bird vs rodent
+                if np.random.random() < 0.5:
+                    prey_class_id = 0  # bird
+                    prey_class_name = "bird"
+                else:
+                    prey_class_id = 3  # rodent
+                    prey_class_name = "rodent"
                 detections.append(
                     Detection(
-                        class_id=14,  # COCO bird
-                        class_name="bird",
+                        class_id=prey_class_id,
+                        class_name=prey_class_name,
                         confidence=np.random.uniform(0.50, 0.85),
                         bbox=BoundingBox(
-                            x=bird_x, y=bird_y,
+                            x=prey_x, y=prey_y,
                             width=np.random.uniform(0.05, 0.10),
                             height=np.random.uniform(0.04, 0.08),
                         ),

@@ -22,19 +22,22 @@
             },
             "custom_catprey": {
                 "model_path": "models/yolov8n_catprey.hef",
-                "classes": {"0": "cat", "1": "rodent", "2": "leaf", "3": "bird"},
-                "note": "Custom trained model with rodent detection"
+                "classes": {"0": "bird", "1": "cat", "2": "leaf", "3": "rodent"},
+                "note": "Custom trained model with 4 classes"
             }
         },
-        "model_path": "models/yolov8n.hef",
+        "model_path": "models/yolov8n_catprey.hef",
         "classes": {
-            "15": "cat",
-            "14": "bird"
+            "0": "bird",
+            "1": "cat",
+            "2": "leaf",
+            "3": "rodent"
         },
         "thresholds": {
             "cat": 0.55,
             "rodent": 0.45,
-            "bird": 0.80
+            "bird": 0.80,
+            "leaf": 0.90
         },
         "spatial_validation": {
             "enabled": true,
