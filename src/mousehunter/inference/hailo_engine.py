@@ -553,9 +553,9 @@ class HailoEngine:
                             box_data = box_tensor[y, x]
                             decoded = self._decode_dfl(box_data)
 
-                            # Debug: print decoded values for first few high-confidence detections
-                            if self._frame_count < 5 and max_score > 0.4:
-                                print(f"[DEBUG] DFL at grid({x},{y}): decoded={decoded}, score={max_score:.2f}, class={class_id}")
+                            # Debug: log decoded values for first few high-confidence detections
+                            # if self._frame_count < 5 and max_score > 0.4:
+                            #     print(f"[DEBUG] DFL at grid({x},{y}): decoded={decoded}, score={max_score:.2f}, class={class_id}")
 
                             # DFL values are distances in grid cell units
                             # YOLOv8 order: [left, top, right, bottom] from cell center
@@ -571,11 +571,11 @@ class HailoEngine:
                             x2_pixels = cx_pixels + right_dist
                             y2_pixels = cy_pixels + bottom_dist
 
-                            # Debug: print box calculation
-                            if self._frame_count < 5 and max_score > 0.4:
-                                print(f"[DEBUG]   center=({cx_pixels:.0f},{cy_pixels:.0f}), "
-                                      f"dists=L:{left_dist:.0f},T:{top_dist:.0f},R:{right_dist:.0f},B:{bottom_dist:.0f}")
-                                print(f"[DEBUG]   box=({x1_pixels:.0f},{y1_pixels:.0f})-({x2_pixels:.0f},{y2_pixels:.0f})")
+                            # Debug: log box calculation (uncomment for debugging)
+                            # if self._frame_count < 5 and max_score > 0.4:
+                            #     print(f"[DEBUG]   center=({cx_pixels:.0f},{cy_pixels:.0f}), "
+                            #           f"dists=L:{left_dist:.0f},T:{top_dist:.0f},R:{right_dist:.0f},B:{bottom_dist:.0f}")
+                            #     print(f"[DEBUG]   box=({x1_pixels:.0f},{y1_pixels:.0f})-({x2_pixels:.0f},{y2_pixels:.0f})")
 
                         elif box_tensor.shape[-1] == 4:
                             # Direct format - could be xywh or ltrb
