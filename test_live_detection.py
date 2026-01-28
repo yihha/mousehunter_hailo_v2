@@ -69,8 +69,17 @@ def draw_detections(frame: np.ndarray, detections: list, class_colors: dict) -> 
     return np.array(img)
 
 
-def run_live_detection(duration: int = 30, save_all: bool = False, confidence: float = 0.3):
-    """Run live detection test."""
+def run_live_detection(duration: int = 30, save_all: bool = False, confidence: float = 0.3,
+                       vflip: bool = False, hflip: bool = False):
+    """Run live detection test.
+
+    Args:
+        duration: Test duration in seconds
+        save_all: Save periodic frames even without detections
+        confidence: Confidence threshold for detections
+        vflip: Vertical flip (for upside-down mounted camera)
+        hflip: Horizontal flip (for mirror-mounted camera)
+    """
 
     print("=" * 60)
     print("  Live Detection Test")
@@ -95,16 +104,24 @@ def run_live_detection(duration: int = 30, save_all: bool = False, confidence: f
     print("\nInitializing camera...")
     try:
         from picamera2 import Picamera2
+        from libcamera import Transform
 
         camera = Picamera2()
+
+        # Create transform for camera orientation
+        # vflip=True, hflip=True = 180 degree rotation (for upside-down mounted camera)
+        transform = Transform(vflip=vflip, hflip=hflip)
+
         config = camera.create_video_configuration(
             main={"size": (1280, 720), "format": "RGB888"},
             lores={"size": (640, 640), "format": "RGB888"},
             buffer_count=4,
+            transform=transform,
         )
         camera.configure(config)
         camera.start()
-        print("Camera started")
+        flip_status = f"vflip={vflip}, hflip={hflip}" if (vflip or hflip) else "no flip"
+        print(f"Camera started ({flip_status})")
 
         # Let camera warm up
         time.sleep(1)
@@ -264,12 +281,24 @@ def main():
                         help="Save periodic frames even without detections")
     parser.add_argument("--confidence", type=float, default=0.3,
                         help="Confidence threshold (default: 0.3)")
+    parser.add_argument("--vflip", action="store_true",
+                        help="Vertical flip (for upside-down mounted camera)")
+    parser.add_argument("--hflip", action="store_true",
+                        help="Horizontal flip (for mirrored camera)")
+    parser.add_argument("--flip", action="store_true",
+                        help="Apply both vflip and hflip (180° rotation)")
     args = parser.parse_args()
+
+    # --flip is shorthand for both vflip and hflip
+    vflip = args.vflip or args.flip
+    hflip = args.hflip or args.flip
 
     success = run_live_detection(
         duration=args.duration,
         save_all=args.save_all,
         confidence=args.confidence,
+        vflip=vflip,
+        hflip=hflip,
     )
 
     sys.exit(0 if success else 1)
