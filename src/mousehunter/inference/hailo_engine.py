@@ -419,69 +419,111 @@ class HailoEngine:
         Post-process raw YOLOv8 output tensors (no NMS).
 
         YOLOv8 outputs 6 tensors (3 scales x 2 outputs each):
-        - Box regression with DFL: (H, W, 64) where 64 = 4 coords * 16 DFL bins
-        - Class scores: (H, W, num_classes)
+        - Box regression with DFL: 64 channels (4 coords * 16 DFL bins)
+        - Class scores: num_classes channels
+
+        Tensor formats:
+        - ONNX/PyTorch: NCHW [batch, channels, H, W] e.g., [1, 64, 80, 80]
+        - Hailo output: Usually HWC [H, W, channels] e.g., [80, 80, 64]
 
         Scales: 80x80, 40x40, 20x20 for 640x640 input
+
+        DFL (Distribution Focal Loss) outputs distance from cell center to each edge:
+        - decoded[0] = left distance (cells)
+        - decoded[1] = top distance (cells)
+        - decoded[2] = right distance (cells)
+        - decoded[3] = bottom distance (cells)
         """
         detections = []
         num_classes = len(self.classes)
+        input_size = 640.0  # Model input size
 
-        # Sort outputs by name to group them properly
-        sorted_outputs = sorted(outputs.items(), key=lambda x: x[0])
+        # Log tensor info for debugging (first few frames only)
+        if self._frame_count < 3:
+            logger.info(f"Raw outputs: {len(outputs)} items")
+            for k, v in outputs.items():
+                if isinstance(v, np.ndarray):
+                    logger.info(f"  '{k}': shape={v.shape}, dtype={v.dtype}")
 
-        # Extract tensors - typically alternating box/class or grouped
-        tensors = [v for k, v in sorted_outputs if isinstance(v, np.ndarray)]
+        # Try to match tensors by name first (more reliable)
+        # Expected names: bbox_scale0/cls_scale0, bbox_scale1/cls_scale1, bbox_scale2/cls_scale2
+        # Or: output0, output1, etc.
+        box_tensors_by_scale = {}
+        class_tensors_by_scale = {}
 
-        if len(tensors) < 2:
-            logger.warning(f"Expected multiple output tensors, got {len(tensors)}")
-            return detections
-
-        # Try to identify box and class tensors by shape
-        # YOLOv8 custom model outputs:
-        #   - Box regression (DFL): (H, W, 64) where 64 = 4 * 16 bins
-        #   - Class scores: (H, W, num_classes)
-        box_tensors = []
-        class_tensors = []
-
-        for t in tensors:
-            if t.ndim < 2:
+        for name, tensor in outputs.items():
+            if not isinstance(tensor, np.ndarray):
                 continue
-            last_dim = t.shape[-1]
 
-            # DFL box regression is always 64 channels
-            if last_dim == 64:
-                box_tensors.append(t)
-            # Class scores have num_classes channels
-            elif last_dim == num_classes:
-                class_tensors.append(t)
-            # Combined format (box + class)
-            elif last_dim == 64 + num_classes:
-                box_tensors.append(t[..., :64])
-                class_tensors.append(t[..., 64:])
-            elif last_dim == 4 + num_classes:
-                # Direct xywh + class format
-                box_tensors.append(t[..., :4])
-                class_tensors.append(t[..., 4:])
+            # Normalize tensor to HWC format [H, W, C]
+            tensor = self._normalize_tensor_format(tensor, num_classes)
+            if tensor is None:
+                continue
 
-        if not class_tensors:
+            h, w, c = tensor.shape
+
+            # Identify by name pattern
+            name_lower = name.lower()
+            if 'bbox' in name_lower or 'box' in name_lower:
+                # Extract scale from name (scale0, scale1, scale2) or use spatial size
+                scale = self._get_scale_from_name_or_size(name_lower, h)
+                box_tensors_by_scale[scale] = tensor
+            elif 'cls' in name_lower or 'class' in name_lower:
+                scale = self._get_scale_from_name_or_size(name_lower, h)
+                class_tensors_by_scale[scale] = tensor
+            else:
+                # Identify by channel count
+                if c == 64:
+                    scale = self._get_scale_from_name_or_size(name_lower, h)
+                    box_tensors_by_scale[scale] = tensor
+                elif c == num_classes:
+                    scale = self._get_scale_from_name_or_size(name_lower, h)
+                    class_tensors_by_scale[scale] = tensor
+
+        # If name-based matching didn't work, fall back to shape-based matching
+        if not class_tensors_by_scale:
+            logger.info("Name-based matching failed, trying shape-based matching")
+            all_tensors = []
+            for name, tensor in outputs.items():
+                if isinstance(tensor, np.ndarray):
+                    norm = self._normalize_tensor_format(tensor, num_classes)
+                    if norm is not None:
+                        all_tensors.append((name, norm))
+
+            for name, tensor in all_tensors:
+                h, w, c = tensor.shape
+                scale = self._get_scale_from_name_or_size("", h)
+                if c == 64:
+                    box_tensors_by_scale[scale] = tensor
+                elif c == num_classes:
+                    class_tensors_by_scale[scale] = tensor
+
+        if not class_tensors_by_scale:
             logger.warning("Could not identify class score tensors")
             return detections
+
+        if self._frame_count < 3:
+            logger.info(f"Matched tensors - boxes: {list(box_tensors_by_scale.keys())}, "
+                       f"classes: {list(class_tensors_by_scale.keys())}")
 
         # Process each scale
         all_boxes = []
         all_scores = []
         all_class_ids = []
 
-        for scale_idx, class_tensor in enumerate(class_tensors):
-            h, w = class_tensor.shape[:2]
-            stride = 640 // h  # Assuming 640x640 input
+        for scale, class_tensor in class_tensors_by_scale.items():
+            h, w, c = class_tensor.shape
+            stride = int(input_size / h)  # 8, 16, or 32 for 80x80, 40x40, 20x20
 
             # Apply sigmoid to class scores
             scores = self._sigmoid(class_tensor)
 
-            # Generate grid
-            grid_y, grid_x = np.meshgrid(np.arange(h), np.arange(w), indexing='ij')
+            # Get corresponding box tensor
+            box_tensor = box_tensors_by_scale.get(scale)
+
+            if self._frame_count < 3:
+                logger.info(f"Processing scale {scale}: grid={h}x{w}, stride={stride}, "
+                           f"has_box_tensor={box_tensor is not None}")
 
             # For each cell, get best class
             for y in range(h):
@@ -494,43 +536,67 @@ class HailoEngine:
 
                     class_id = int(np.argmax(class_scores))
 
-                    # Compute box center (simple version - just grid cell center)
-                    cx = (x + 0.5) * stride / 640.0
-                    cy = (y + 0.5) * stride / 640.0
+                    # Grid cell center in pixels
+                    cx_pixels = (x + 0.5) * stride
+                    cy_pixels = (y + 0.5) * stride
 
-                    # Default box size (will be refined if we have box tensors)
-                    bw = stride / 640.0 * 2
-                    bh = stride / 640.0 * 2
+                    # Default box (if no box tensor)
+                    x1_pixels = cx_pixels - stride
+                    y1_pixels = cy_pixels - stride
+                    x2_pixels = cx_pixels + stride
+                    y2_pixels = cy_pixels + stride
 
-                    # Try to get box from box tensor
-                    if scale_idx < len(box_tensors):
-                        box_tensor = box_tensors[scale_idx]
-                        if box_tensor.shape[:2] == (h, w):
-                            if box_tensor.shape[-1] == 64:
-                                # DFL format - decode
-                                box_data = box_tensor[y, x]
-                                decoded = self._decode_dfl(box_data)
-                                # decoded is [left, top, right, bottom] offsets
-                                cx = (x + 0.5 - decoded[0] + decoded[2]) / 2 * stride / 640.0
-                                cy = (y + 0.5 - decoded[1] + decoded[3]) / 2 * stride / 640.0
-                                bw = (decoded[0] + decoded[2]) * stride / 640.0
-                                bh = (decoded[1] + decoded[3]) * stride / 640.0
-                            elif box_tensor.shape[-1] == 4:
-                                # Direct xywh or ltrb format
-                                box_data = box_tensor[y, x]
-                                bw = box_data[2] * stride / 640.0
-                                bh = box_data[3] * stride / 640.0
+                    # Get box from DFL tensor if available
+                    if box_tensor is not None:
+                        if box_tensor.shape[-1] == 64:
+                            # DFL format - decode to [left, top, right, bottom] distances
+                            box_data = box_tensor[y, x]
+                            decoded = self._decode_dfl(box_data)
 
-                    # Convert to x, y, w, h (top-left corner)
-                    x1 = max(0, cx - bw / 2)
-                    y1 = max(0, cy - bh / 2)
-                    w_box = min(bw, 1.0 - x1)
-                    h_box = min(bh, 1.0 - y1)
+                            # DFL values are distances in grid cell units
+                            # Multiply by stride to get pixel distances from cell center
+                            left_dist = decoded[0] * stride
+                            top_dist = decoded[1] * stride
+                            right_dist = decoded[2] * stride
+                            bottom_dist = decoded[3] * stride
 
-                    if w_box > 0.01 and h_box > 0.01:
-                        all_boxes.append([x1, y1, w_box, h_box])
+                            # Calculate box edges
+                            x1_pixels = cx_pixels - left_dist
+                            y1_pixels = cy_pixels - top_dist
+                            x2_pixels = cx_pixels + right_dist
+                            y2_pixels = cy_pixels + bottom_dist
+
+                        elif box_tensor.shape[-1] == 4:
+                            # Direct format - could be xywh or ltrb
+                            box_data = box_tensor[y, x]
+                            # Assume xywh format, scaled by stride
+                            bw_pixels = box_data[2] * stride
+                            bh_pixels = box_data[3] * stride
+                            x1_pixels = cx_pixels - bw_pixels / 2
+                            y1_pixels = cy_pixels - bh_pixels / 2
+                            x2_pixels = cx_pixels + bw_pixels / 2
+                            y2_pixels = cy_pixels + bh_pixels / 2
+
+                    # Clamp to image bounds
+                    x1_pixels = max(0, x1_pixels)
+                    y1_pixels = max(0, y1_pixels)
+                    x2_pixels = min(input_size, x2_pixels)
+                    y2_pixels = min(input_size, y2_pixels)
+
+                    # Convert to normalized coordinates [0, 1]
+                    x1_norm = x1_pixels / input_size
+                    y1_norm = y1_pixels / input_size
+                    w_norm = (x2_pixels - x1_pixels) / input_size
+                    h_norm = (y2_pixels - y1_pixels) / input_size
+
+                    # Filter invalid boxes
+                    if w_norm > 0.01 and h_norm > 0.01 and w_norm < 0.95 and h_norm < 0.95:
+                        all_boxes.append([x1_norm, y1_norm, w_norm, h_norm])
                         all_scores.append(float(max_score))
                         all_class_ids.append(class_id)
+
+        if self._frame_count < 3:
+            logger.info(f"Pre-NMS detections: {len(all_boxes)}")
 
         # Apply NMS
         if all_boxes:
@@ -557,6 +623,86 @@ class HailoEngine:
                 )
 
         return sorted(detections, key=lambda d: d.confidence, reverse=True)
+
+    def _normalize_tensor_format(self, tensor: np.ndarray, num_classes: int) -> np.ndarray | None:
+        """
+        Normalize tensor to HWC format [H, W, C].
+
+        Handles:
+        - NCHW [batch, channels, H, W] -> [H, W, C]
+        - CHW [channels, H, W] -> [H, W, C]
+        - HWC [H, W, channels] -> [H, W, C] (no change)
+
+        Args:
+            tensor: Input tensor in any format
+            num_classes: Number of classes (to help identify format)
+
+        Returns:
+            Tensor in HWC format, or None if format can't be determined
+        """
+        if tensor.ndim == 4:
+            # NCHW format [batch, channels, H, W]
+            # Remove batch dimension and transpose to HWC
+            tensor = tensor[0]  # [C, H, W]
+            tensor = np.transpose(tensor, (1, 2, 0))  # [H, W, C]
+            return tensor
+
+        elif tensor.ndim == 3:
+            # Could be CHW or HWC
+            d0, d1, d2 = tensor.shape
+
+            # CHW format: first dim is channels (64 or num_classes)
+            if d0 in (64, num_classes) and d1 == d2:
+                # [C, H, W] -> [H, W, C]
+                return np.transpose(tensor, (1, 2, 0))
+
+            # HWC format: last dim is channels
+            elif d2 in (64, num_classes) and d0 == d1:
+                # Already [H, W, C]
+                return tensor
+
+            # Ambiguous - check if spatial dims are typical YOLO sizes
+            yolo_sizes = {80, 40, 20}
+            if d1 in yolo_sizes and d2 in yolo_sizes and d0 in (64, num_classes):
+                # [C, H, W] -> [H, W, C]
+                return np.transpose(tensor, (1, 2, 0))
+            elif d0 in yolo_sizes and d1 in yolo_sizes and d2 in (64, num_classes):
+                # [H, W, C] - already correct
+                return tensor
+
+            # Last resort: assume HWC if last dim is small
+            if d2 <= 64:
+                return tensor
+            elif d0 <= 64:
+                return np.transpose(tensor, (1, 2, 0))
+
+        elif tensor.ndim == 2:
+            # Flattened - can't use
+            return None
+
+        logger.warning(f"Cannot normalize tensor with shape {tensor.shape}")
+        return None
+
+    def _get_scale_from_name_or_size(self, name: str, spatial_size: int) -> int:
+        """
+        Get scale index from tensor name or spatial size.
+
+        Args:
+            name: Tensor name (e.g., 'bbox_scale0', 'cls_scale2')
+            spatial_size: Spatial dimension (80, 40, or 20)
+
+        Returns:
+            Scale index (0, 1, or 2)
+        """
+        # Try to extract from name
+        import re
+        match = re.search(r'scale[_]?(\d+)', name)
+        if match:
+            return int(match.group(1))
+
+        # Fall back to spatial size
+        size_to_scale = {80: 0, 40: 1, 20: 2}
+        return size_to_scale.get(spatial_size, 0)
 
     def _sigmoid(self, x: np.ndarray) -> np.ndarray:
         """Apply sigmoid activation."""
