@@ -186,8 +186,8 @@ class HardwareTester:
         result.details.append(f"Classes: {inference_config.classes}")
         result.details.append(f"Thresholds: {inference_config.thresholds}")
 
-        # Verify class mapping
-        expected_classes = {"0": "bird", "1": "cat", "2": "leaf", "3": "rodent"}
+        # Verify class mapping (v3: 2 classes only)
+        expected_classes = {"0": "cat", "1": "rodent"}
         if inference_config.classes != expected_classes:
             raise ValueError(f"Class mapping mismatch! Expected {expected_classes}, got {inference_config.classes}")
 
@@ -251,7 +251,7 @@ class HardwareTester:
         engine = HailoEngine(
             model_path=self.model_path,
             confidence_threshold=0.5,
-            classes={"0": "bird", "1": "cat", "2": "leaf", "3": "rodent"},
+            classes={"0": "cat", "1": "rodent"},
         )
 
         result.details.append(f"Initialized: {engine._initialized}")
@@ -270,7 +270,7 @@ class HardwareTester:
         engine = HailoEngine(
             model_path=self.model_path,
             confidence_threshold=0.3,  # Lower threshold to catch more
-            classes={"0": "bird", "1": "cat", "2": "leaf", "3": "rodent"},
+            classes={"0": "cat", "1": "rodent"},
         )
 
         # Create test frame (random noise)
@@ -295,7 +295,7 @@ class HardwareTester:
         engine = HailoEngine(
             model_path=self.model_path,
             confidence_threshold=0.5,
-            classes={"0": "bird", "1": "cat", "2": "leaf", "3": "rodent"},
+            classes={"0": "cat", "1": "rodent"},
         )
 
         test_frame = np.random.randint(0, 255, (640, 640, 3), dtype=np.uint8)
@@ -413,12 +413,12 @@ class HardwareTester:
         engine = HailoEngine(
             model_path=self.model_path,
             confidence_threshold=0.5,
-            classes={"0": "bird", "1": "cat", "2": "leaf", "3": "rodent"},
+            classes={"0": "cat", "1": "rodent"},
         )
 
         detector = PreyDetector(
             engine=engine,
-            thresholds={"cat": 0.55, "rodent": 0.45, "bird": 0.80, "leaf": 0.90},
+            thresholds={"cat": 0.55, "rodent": 0.45},
             window_size=5,
             trigger_count=3,
             spatial_validation_enabled=True,
@@ -441,12 +441,12 @@ class HardwareTester:
         engine = HailoEngine(
             model_path=self.model_path,
             confidence_threshold=0.5,
-            classes={"0": "bird", "1": "cat", "2": "leaf", "3": "rodent"},
+            classes={"0": "cat", "1": "rodent"},
         )
 
         detector = PreyDetector(
             engine=engine,
-            thresholds={"cat": 0.55, "rodent": 0.45, "bird": 0.80, "leaf": 0.90},
+            thresholds={"cat": 0.55, "rodent": 0.45},
             window_size=5,
             trigger_count=3,
         )

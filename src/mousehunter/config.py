@@ -126,15 +126,21 @@ class InferenceConfig(BaseSettings):
     )
     classes: dict[str, str] = Field(
         default=_json_config.get("inference", {}).get(
-            "classes", {"0": "bird", "1": "cat", "2": "leaf", "3": "rodent"}
+            "classes", {"0": "cat", "1": "rodent"}
         ),
-        description="Class ID to name mapping. Custom: 0=bird, 1=cat, 2=leaf, 3=rodent. COCO: 15=cat, 14=bird",
+        description="Class ID to name mapping. v3 Custom: 0=cat, 1=rodent. COCO: 15=cat, 14=bird",
+    )
+
+    # DFL reg_max (must match training configuration)
+    reg_max: int = Field(
+        default=_json_config.get("inference", {}).get("reg_max", 8),
+        description="DFL reg_max (number of bins per coordinate). v3 uses 8 for better INT8 quantization.",
     )
 
     # Per-class confidence thresholds
     thresholds: dict[str, float] = Field(
         default=_json_config.get("inference", {}).get(
-            "thresholds", {"cat": 0.55, "rodent": 0.45, "bird": 0.80, "leaf": 0.90}
+            "thresholds", {"cat": 0.55, "rodent": 0.45}
         ),
         description="Per-class confidence thresholds",
     )

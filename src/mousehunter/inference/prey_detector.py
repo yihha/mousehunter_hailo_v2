@@ -3,7 +3,7 @@ Prey Detector - Hierarchical spatial prey detection with temporal smoothing
 
 Implements the "Cat as Anchor" detection strategy:
 1. Cat must be detected (high confidence anchor)
-2. Prey (rodent/bird) must be detected
+2. Prey (rodent) must be detected (v3: bird removed for better quantization)
 3. Prey must spatially intersect with cat (carrying validation)
 4. Uses rolling window (3-of-5) instead of consecutive frames
 
@@ -93,13 +93,13 @@ class PreyDetector:
 
     Detection strategy:
     1. Anchor: Detect cat with high confidence (98% mAP)
-    2. Filter: Detect prey (rodent/bird) with class-specific thresholds
+    2. Filter: Detect prey (rodent) with class-specific thresholds
     3. Validate: Prey must spatially intersect expanded cat bounding box
     4. Smooth: Use rolling window (3-of-5) to filter temporal noise
     """
 
-    # Prey classes to detect
-    PREY_CLASSES = {"rodent", "bird"}
+    # Prey classes to detect (v3: rodent only, bird removed for better quantization)
+    PREY_CLASSES = {"rodent"}
 
     def __init__(
         self,
@@ -121,7 +121,7 @@ class PreyDetector:
             spatial_validation_enabled: Require prey near cat
             box_expansion: Expand cat box by this factor for intersection
         """
-        self.thresholds = thresholds or {"cat": 0.55, "rodent": 0.45, "bird": 0.80}
+        self.thresholds = thresholds or {"cat": 0.55, "rodent": 0.45}
         self.window_size = window_size
         self.trigger_count = trigger_count
         self.spatial_validation_enabled = spatial_validation_enabled
@@ -501,7 +501,7 @@ def test_detector() -> None:
     print("=== Prey Detector Test (Spatial + Rolling Window) ===")
 
     detector = PreyDetector(
-        thresholds={"cat": 0.55, "rodent": 0.45, "bird": 0.80},
+        thresholds={"cat": 0.55, "rodent": 0.45},
         window_size=5,
         trigger_count=3,
         spatial_validation_enabled=True,

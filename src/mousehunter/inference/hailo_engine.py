@@ -51,28 +51,21 @@ class MockHailoInference:
 
             detections.append(
                 Detection(
-                    class_id=1,  # Custom model: cat
+                    class_id=0,  # v3 model: cat is class 0
                     class_name="cat",
                     confidence=np.random.uniform(0.70, 0.98),
                     bbox=BoundingBox(x=cat_x, y=cat_y, width=cat_w, height=cat_h),
                 )
             )
 
-            # 8% chance of prey near cat (bird or rodent)
+            # 8% chance of prey (rodent) near cat
             if np.random.random() < 0.08:
                 prey_x = cat_x + cat_w * np.random.uniform(0.3, 0.7)
                 prey_y = cat_y + cat_h * np.random.uniform(0.1, 0.4)
-                # 50/50 chance bird vs rodent
-                if np.random.random() < 0.5:
-                    prey_class_id = 0  # bird
-                    prey_class_name = "bird"
-                else:
-                    prey_class_id = 3  # rodent
-                    prey_class_name = "rodent"
                 detections.append(
                     Detection(
-                        class_id=prey_class_id,
-                        class_name=prey_class_name,
+                        class_id=1,  # v3 model: rodent is class 1
+                        class_name="rodent",
                         confidence=np.random.uniform(0.50, 0.85),
                         bbox=BoundingBox(
                             x=prey_x, y=prey_y,
@@ -104,6 +97,7 @@ class HailoEngine:
         confidence_threshold: float = 0.6,
         nms_iou_threshold: float = 0.45,
         classes: dict[str, str] | None = None,
+        reg_max: int = 8,
         force_mock: bool = False,
     ):
         """
@@ -113,13 +107,15 @@ class HailoEngine:
             model_path: Path to compiled HEF model
             confidence_threshold: Minimum confidence for detections
             nms_iou_threshold: IoU threshold for NMS
-            classes: Class ID to name mapping (e.g., {"0": "bird", "1": "cat", "2": "leaf", "3": "rodent"})
+            classes: Class ID to name mapping (e.g., {"0": "cat", "1": "rodent"})
+            reg_max: DFL reg_max (bins per coordinate). v3 uses 8 for better INT8 quantization.
             force_mock: Force mock mode even if Hailo hardware is available
         """
         self.model_path = Path(model_path)
         self.confidence_threshold = confidence_threshold
         self.nms_iou_threshold = nms_iou_threshold
-        self.classes = classes or {"0": "bird", "1": "cat", "2": "leaf", "3": "rodent"}
+        self.classes = classes or {"0": "cat", "1": "rodent"}
+        self.reg_max = reg_max
         self._force_mock = force_mock
         self._use_hailo = HAILO_AVAILABLE and not force_mock
 
@@ -473,7 +469,9 @@ class HailoEngine:
                 class_tensors_by_scale[scale] = tensor
             else:
                 # Identify by channel count
-                if c == 64:
+                # Box channels = 4 * reg_max (64 for reg_max=16, 32 for reg_max=8)
+                expected_box_channels = 4 * self.reg_max
+                if c == expected_box_channels or c == 64 or c == 32:
                     scale = self._get_scale_from_name_or_size(name_lower, h)
                     box_tensors_by_scale[scale] = tensor
                 elif c == num_classes:
@@ -493,7 +491,9 @@ class HailoEngine:
             for name, tensor in all_tensors:
                 h, w, c = tensor.shape
                 scale = self._get_scale_from_name_or_size("", h)
-                if c == 64:
+                # Box channels = 4 * reg_max (64 for reg_max=16, 32 for reg_max=8)
+                expected_box_channels = 4 * self.reg_max
+                if c == expected_box_channels or c == 64 or c == 32:
                     box_tensors_by_scale[scale] = tensor
                 elif c == num_classes:
                     class_tensors_by_scale[scale] = tensor
@@ -548,7 +548,8 @@ class HailoEngine:
 
                     # Get box from DFL tensor if available
                     if box_tensor is not None:
-                        if box_tensor.shape[-1] == 64:
+                        expected_box_channels = 4 * self.reg_max
+                        if box_tensor.shape[-1] == expected_box_channels or box_tensor.shape[-1] in (32, 64):
                             # DFL format - decode distances
                             box_data = box_tensor[y, x]
                             decoded = self._decode_dfl(box_data)
@@ -651,6 +652,10 @@ class HailoEngine:
         Returns:
             Tensor in HWC format, or None if format can't be determined
         """
+        # Box channel counts: 64 for reg_max=16, 32 for reg_max=8
+        box_channel_counts = {32, 64, 4 * self.reg_max}
+        valid_channel_counts = box_channel_counts | {num_classes}
+
         if tensor.ndim == 4:
             # NCHW format [batch, channels, H, W]
             # Remove batch dimension and transpose to HWC
@@ -662,22 +667,22 @@ class HailoEngine:
             # Could be CHW or HWC
             d0, d1, d2 = tensor.shape
 
-            # CHW format: first dim is channels (64 or num_classes)
-            if d0 in (64, num_classes) and d1 == d2:
+            # CHW format: first dim is channels (32, 64, or num_classes)
+            if d0 in valid_channel_counts and d1 == d2:
                 # [C, H, W] -> [H, W, C]
                 return np.transpose(tensor, (1, 2, 0))
 
             # HWC format: last dim is channels
-            elif d2 in (64, num_classes) and d0 == d1:
+            elif d2 in valid_channel_counts and d0 == d1:
                 # Already [H, W, C]
                 return tensor
 
             # Ambiguous - check if spatial dims are typical YOLO sizes
             yolo_sizes = {80, 40, 20}
-            if d1 in yolo_sizes and d2 in yolo_sizes and d0 in (64, num_classes):
+            if d1 in yolo_sizes and d2 in yolo_sizes and d0 in valid_channel_counts:
                 # [C, H, W] -> [H, W, C]
                 return np.transpose(tensor, (1, 2, 0))
-            elif d0 in yolo_sizes and d1 in yolo_sizes and d2 in (64, num_classes):
+            elif d0 in yolo_sizes and d1 in yolo_sizes and d2 in valid_channel_counts:
                 # [H, W, C] - already correct
                 return tensor
 
@@ -719,18 +724,22 @@ class HailoEngine:
         """Apply sigmoid activation."""
         return 1 / (1 + np.exp(-np.clip(x, -500, 500)))
 
-    def _decode_dfl(self, dfl_output: np.ndarray, reg_max: int = 16) -> np.ndarray:
+    def _decode_dfl(self, dfl_output: np.ndarray, reg_max: int | None = None) -> np.ndarray:
         """
         Decode DFL (Distribution Focal Loss) box regression.
 
         Args:
-            dfl_output: (64,) array = 4 coords * 16 bins
-            reg_max: Number of bins per coordinate (default 16)
+            dfl_output: (4*reg_max,) array = 4 coords * reg_max bins
+            reg_max: Number of bins per coordinate. If None, uses self.reg_max.
+                     v3 model uses 8 bins for better INT8 quantization.
 
         Returns:
             (4,) array of [left, top, right, bottom] offsets
         """
-        # Reshape to (4, 16)
+        if reg_max is None:
+            reg_max = self.reg_max
+
+        # Reshape to (4, reg_max)
         dfl = dfl_output.reshape(4, reg_max)
         # Softmax over bins
         dfl_softmax = np.exp(dfl) / np.sum(np.exp(dfl), axis=1, keepdims=True)
@@ -850,10 +859,11 @@ def _create_default_engine() -> HailoEngine:
             model_path=model_path,
             confidence_threshold=inference_config.confidence_threshold,
             classes=inference_config.classes,
+            reg_max=inference_config.reg_max,
         )
     except ImportError:
         logger.warning("Config not available, using defaults")
-        return HailoEngine(model_path="models/yolov8n_catprey.hef")
+        return HailoEngine(model_path="models/yolov8n_catprey.hef", reg_max=8)
 
 
 # Global instance (lazy)

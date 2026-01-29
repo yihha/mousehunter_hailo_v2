@@ -42,8 +42,8 @@ class TestMockHailoInference:
         # Check detection structure
         for det in all_detections:
             assert isinstance(det, Detection)
-            assert det.class_id in [0, 1, 2, 3]  # cat, rodent, leaf, bird
-            assert det.class_name in ["cat", "rodent", "leaf", "bird"]
+            assert det.class_id in [0, 1]  # v3: 0=cat, 1=rodent
+            assert det.class_name in ["cat", "rodent"]
             assert 0 <= det.confidence <= 1
             assert isinstance(det.bbox, BoundingBox)
 
@@ -77,8 +77,8 @@ class TestHailoEngine:
 
     def test_engine_classes(self, mock_engine):
         """Test engine has correct class mapping."""
-        # Default classes use custom model IDs: 0=bird, 1=cat, 2=leaf, 3=rodent
-        assert mock_engine.classes == {"0": "bird", "1": "cat", "2": "leaf", "3": "rodent"}
+        # v3 model uses 2 classes: 0=cat, 1=rodent
+        assert mock_engine.classes == {"0": "cat", "1": "rodent"}
 
     def test_engine_infer(self, mock_engine, sample_frame):
         """Test inference returns DetectionFrame."""
@@ -262,7 +262,8 @@ class TestHailoHardware:
         engine = HailoEngine(
             model_path=model_path,
             confidence_threshold=0.5,
-            classes={"0": "bird", "1": "cat", "2": "leaf", "3": "rodent"},
+            classes={"0": "cat", "1": "rodent"},
+            reg_max=8,
             force_mock=False,  # Use real Hailo
         )
 

@@ -56,11 +56,11 @@ def rodent_far_detection():
 
 
 @pytest.fixture
-def bird_detection():
-    """A sample bird detection (custom model class 0)."""
+def additional_rodent_detection():
+    """A sample additional rodent detection (v3: replaces bird fixture)."""
     return Detection(
-        class_id=0,
-        class_name="bird",
+        class_id=1,
+        class_name="rodent",
         confidence=0.85,
         bbox=BoundingBox(x=0.48, y=0.38, width=0.07, height=0.06),
     )
@@ -68,21 +68,22 @@ def bird_detection():
 
 @pytest.fixture
 def mock_engine():
-    """Create a HailoEngine in mock mode with custom model classes."""
+    """Create a HailoEngine in mock mode with v3 model classes (cat + rodent only)."""
     return HailoEngine(
         model_path="models/yolov8n_catprey.hef",
         confidence_threshold=0.5,
-        classes={"0": "bird", "1": "cat", "2": "leaf", "3": "rodent"},
+        classes={"0": "cat", "1": "rodent"},
+        reg_max=8,
         force_mock=True,  # Ensures tests run in mock mode even on Pi with Hailo
     )
 
 
 @pytest.fixture
 def prey_detector(mock_engine):
-    """Create a PreyDetector with mock engine."""
+    """Create a PreyDetector with mock engine (v3: cat + rodent only)."""
     return PreyDetector(
         engine=mock_engine,
-        thresholds={"cat": 0.55, "rodent": 0.45, "bird": 0.80, "leaf": 0.90},
+        thresholds={"cat": 0.55, "rodent": 0.45},
         window_size=5,
         trigger_count=3,
         spatial_validation_enabled=True,
@@ -92,10 +93,10 @@ def prey_detector(mock_engine):
 
 @pytest.fixture
 def prey_detector_no_spatial(mock_engine):
-    """Create a PreyDetector with spatial validation disabled."""
+    """Create a PreyDetector with spatial validation disabled (v3: cat + rodent only)."""
     return PreyDetector(
         engine=mock_engine,
-        thresholds={"cat": 0.55, "rodent": 0.45, "bird": 0.80, "leaf": 0.90},
+        thresholds={"cat": 0.55, "rodent": 0.45},
         window_size=5,
         trigger_count=3,
         spatial_validation_enabled=False,
