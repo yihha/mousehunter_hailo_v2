@@ -24,9 +24,9 @@ def sample_bbox():
 
 @pytest.fixture
 def cat_detection(sample_bbox):
-    """A sample cat detection (custom model class 1)."""
+    """A sample cat detection (v3 model class 0)."""
     return Detection(
-        class_id=1,
+        class_id=0,
         class_name="cat",
         confidence=0.85,
         bbox=sample_bbox,
@@ -35,9 +35,9 @@ def cat_detection(sample_bbox):
 
 @pytest.fixture
 def rodent_detection():
-    """A sample rodent detection that overlaps with cat (custom model class 3)."""
+    """A sample rodent detection that overlaps with cat (v3 model class 1)."""
     return Detection(
-        class_id=3,
+        class_id=1,
         class_name="rodent",
         confidence=0.65,
         bbox=BoundingBox(x=0.45, y=0.35, width=0.06, height=0.05),
@@ -46,9 +46,9 @@ def rodent_detection():
 
 @pytest.fixture
 def rodent_far_detection():
-    """A rodent detection far from cat (no overlap, custom model class 3)."""
+    """A rodent detection far from cat (no overlap, v3 model class 1)."""
     return Detection(
-        class_id=3,
+        class_id=1,
         class_name="rodent",
         confidence=0.70,
         bbox=BoundingBox(x=0.8, y=0.8, width=0.05, height=0.04),
