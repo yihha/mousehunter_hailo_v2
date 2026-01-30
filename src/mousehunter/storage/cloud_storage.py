@@ -181,7 +181,7 @@ class CloudStorage:
 
         Args:
             evidence_path: Path to evidence folder
-            prey_type: Detected prey type (e.g., 'rodent', 'bird')
+            prey_type: Detected prey type (e.g., 'rodent')
             confidence: Prey detection confidence
             cat_confidence: Cat detection confidence
             additional_data: Additional metadata fields

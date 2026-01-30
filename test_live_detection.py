@@ -93,10 +93,9 @@ def run_live_detection(duration: int = 30, save_all: bool = False, confidence: f
     print(f"Output directory: {session_dir}")
 
     # Class colors (BGR for consistency, but we use RGB)
+    # v3: only cat and rodent classes
     class_colors = {
-        "bird": (255, 100, 100),    # Red
         "cat": (100, 255, 100),     # Green
-        "leaf": (100, 100, 255),    # Blue
         "rodent": (255, 255, 100),  # Yellow
     }
 

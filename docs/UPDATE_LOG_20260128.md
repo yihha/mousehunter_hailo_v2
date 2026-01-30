@@ -1,5 +1,11 @@
 # Update Log - January 28, 2026
 
+> **⚠️ HISTORICAL DOCUMENT (V2 Model)**
+>
+> This log documents fixes for the **V2 model** which had 4 classes (bird/cat/leaf/rodent) and reg_max=16.
+> The current **V3 model** uses only 2 classes (cat/rodent) with reg_max=8.
+> See `UPDATE_LOG_20260130.md` for V3 model changes.
+
 ## Custom YOLOv8n Model Post-Processing Fix
 
 ### Summary
