@@ -393,7 +393,8 @@ class MouseHunterController:
             f"PREY DETECTED! {event.prey_detection.class_name} "
             f"({event.prey_detection.confidence:.2f}) with cat "
             f"({event.cat_detection.confidence:.2f}), "
-            f"window: {event.detections_in_window}/{event.window_size}"
+            f"score: {event.accumulated_score:.2f}/{event.score_threshold} "
+            f"({event.detection_count} detections in {event.window_seconds}s)"
         )
 
         self._detection_count += 1
