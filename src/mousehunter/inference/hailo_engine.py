@@ -194,9 +194,9 @@ class HailoEngine:
                 inference_time_ms=0.0,
             )
 
-        # Log raw frame info for first few frames
+        # Log raw frame info for first few frames (debug level)
         if self._frame_count < 5:
-            logger.info(
+            logger.debug(
                 f"Raw frame: shape={frame.shape}, dtype={frame.dtype}"
             )
 
@@ -235,9 +235,9 @@ class HailoEngine:
         # Preprocess frame
         input_data = self._preprocess(frame)
 
-        # Debug: Log input details for first few frames
+        # Debug: Log input details for first few frames (debug level)
         if self._frame_count < 5:
-            logger.info(
+            logger.debug(
                 f"Hailo input: shape={input_data.shape}, dtype={input_data.dtype}"
             )
 
@@ -246,26 +246,26 @@ class HailoEngine:
             # This is much simpler - just pass the frame!
             raw_output = self._hailo.run(input_data)
 
-            # Log output format for debugging
+            # Log output format for debugging (debug level)
             if self._frame_count < 5:
                 if isinstance(raw_output, dict):
-                    logger.info(f"Output: dict with {len(raw_output)} keys")
+                    logger.debug(f"Output: dict with {len(raw_output)} keys")
                     for k, v in raw_output.items():
                         if isinstance(v, np.ndarray):
-                            logger.info(f"  {k}: shape={v.shape}, dtype={v.dtype}")
+                            logger.debug(f"  {k}: shape={v.shape}, dtype={v.dtype}")
                         elif isinstance(v, list):
-                            logger.info(f"  {k}: list of {len(v)} items")
+                            logger.debug(f"  {k}: list of {len(v)} items")
                         else:
-                            logger.info(f"  {k}: type={type(v)}")
+                            logger.debug(f"  {k}: type={type(v)}")
                 elif isinstance(raw_output, np.ndarray):
-                    logger.info(f"Output: ndarray shape={raw_output.shape}, dtype={raw_output.dtype}")
+                    logger.debug(f"Output: ndarray shape={raw_output.shape}, dtype={raw_output.dtype}")
                 elif isinstance(raw_output, list):
-                    logger.info(f"Output: list of {len(raw_output)} items")
+                    logger.debug(f"Output: list of {len(raw_output)} items")
                     for i, item in enumerate(raw_output[:3]):
                         if isinstance(item, np.ndarray):
-                            logger.info(f"  [{i}]: shape={item.shape}")
+                            logger.debug(f"  [{i}]: shape={item.shape}")
                 else:
-                    logger.info(f"Output: type={type(raw_output)}")
+                    logger.debug(f"Output: type={type(raw_output)}")
 
         except Exception as e:
             logger.error(f"Hailo inference error: {e}", exc_info=True)
@@ -434,12 +434,12 @@ class HailoEngine:
         num_classes = len(self.classes)
         input_size = 640.0  # Model input size
 
-        # Log tensor info for debugging (first few frames only)
+        # Log tensor info for debugging (first few frames only, debug level)
         if self._frame_count < 3:
-            logger.info(f"Raw outputs: {len(outputs)} items")
+            logger.debug(f"Raw outputs: {len(outputs)} items")
             for k, v in outputs.items():
                 if isinstance(v, np.ndarray):
-                    logger.info(f"  '{k}': shape={v.shape}, dtype={v.dtype}")
+                    logger.debug(f"  '{k}': shape={v.shape}, dtype={v.dtype}")
 
         # Try to match tensors by name first (more reliable)
         # Expected names: bbox_scale0/cls_scale0, bbox_scale1/cls_scale1, bbox_scale2/cls_scale2
@@ -503,8 +503,8 @@ class HailoEngine:
             return detections
 
         if self._frame_count < 3:
-            logger.info(f"Matched tensors - boxes: {list(box_tensors_by_scale.keys())}, "
-                       f"classes: {list(class_tensors_by_scale.keys())}")
+            logger.debug(f"Matched tensors - boxes: {list(box_tensors_by_scale.keys())}, "
+                        f"classes: {list(class_tensors_by_scale.keys())}")
 
         # Process each scale
         all_boxes = []
@@ -522,8 +522,8 @@ class HailoEngine:
             box_tensor = box_tensors_by_scale.get(scale)
 
             if self._frame_count < 3:
-                logger.info(f"Processing scale {scale}: grid={h}x{w}, stride={stride}, "
-                           f"has_box_tensor={box_tensor is not None}")
+                logger.debug(f"Processing scale {scale}: grid={h}x{w}, stride={stride}, "
+                            f"has_box_tensor={box_tensor is not None}")
 
             # For each cell, get best class
             for y in range(h):
@@ -608,7 +608,7 @@ class HailoEngine:
                         all_class_ids.append(class_id)
 
         if self._frame_count < 3:
-            logger.info(f"Pre-NMS detections: {len(all_boxes)}")
+            logger.debug(f"Pre-NMS detections: {len(all_boxes)}")
 
         # Apply NMS
         if all_boxes:
