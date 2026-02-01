@@ -252,9 +252,9 @@ class TestStateTransitions:
         """Test transition from IDLE to VERIFYING."""
         import numpy as np
 
-        # Manually trigger state update with positive detection
+        # Manually trigger state update with positive detection (frame_count mode)
         frame = np.zeros((640, 640, 3), dtype=np.uint8)
-        prey_detector._update_state(
+        prey_detector._update_state_frame_count(
             FrameResult(has_valid_prey=True),
             frame,
         )
@@ -372,3 +372,73 @@ class TestThresholds:
         result = prey_detector._get_best_detection(detections, "rodent")
         assert result is not None
         assert result.confidence == 0.75
+
+
+class TestScoreAccumulation:
+    """Tests for time-based score accumulation mode (v3 default)."""
+
+    def test_initial_state(self, prey_detector_score_accumulation):
+        """Test initial state is IDLE with zero accumulated score."""
+        detector = prey_detector_score_accumulation
+        assert detector.state == DetectionState.IDLE
+        assert detector.accumulated_score == 0.0
+        assert detector.detection_count_in_window == 0
+
+    def test_confirmation_mode_set(self, prey_detector_score_accumulation):
+        """Test score accumulation mode is properly configured."""
+        detector = prey_detector_score_accumulation
+        assert detector.confirmation_mode == "score_accumulation"
+        assert detector.prey_window_seconds == 3.0
+        assert detector.prey_score_threshold == 0.9
+
+    def test_process_frame_updates_state(self, prey_detector_score_accumulation, sample_frame):
+        """Test that processing frames updates detector state."""
+        detector = prey_detector_score_accumulation
+        initial_state = detector.state
+
+        # Process a frame
+        detector.process_frame(sample_frame)
+
+        # State may have changed depending on mock detections
+        # At minimum, we should not crash and state should be valid
+        assert detector.state in [
+            DetectionState.IDLE,
+            DetectionState.MONITORING,
+            DetectionState.VERIFYING,
+            DetectionState.CONFIRMED,
+        ]
+
+    def test_reset_clears_score(self, prey_detector_score_accumulation):
+        """Test reset clears accumulated score."""
+        detector = prey_detector_score_accumulation
+
+        # Manually add some score entries to simulate detections
+        import time
+        from mousehunter.inference.prey_detector import PreyScoreEntry
+
+        detector._prey_scores.append(
+            PreyScoreEntry(
+                timestamp=time.time(),
+                confidence=0.5,
+                detection=None,
+            )
+        )
+
+        assert detector.accumulated_score > 0
+
+        # Reset should clear everything
+        detector.reset()
+        assert detector.accumulated_score == 0.0
+        assert detector.state == DetectionState.IDLE
+        assert len(detector._prey_scores) == 0
+
+    def test_get_status_includes_score_fields(self, prey_detector_score_accumulation):
+        """Test get_status includes score accumulation fields."""
+        status = prey_detector_score_accumulation.get_status()
+
+        assert "confirmation_mode" in status
+        assert status["confirmation_mode"] == "score_accumulation"
+        assert "window_seconds" in status
+        assert "score_threshold" in status
+        assert "accumulated_score" in status
+        assert "detection_count_in_window" in status

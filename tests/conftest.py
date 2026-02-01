@@ -80,10 +80,14 @@ def mock_engine():
 
 @pytest.fixture
 def prey_detector(mock_engine):
-    """Create a PreyDetector with mock engine (v3: cat + rodent only)."""
+    """Create a PreyDetector with mock engine (v3: cat + rodent only).
+
+    Uses legacy frame_count mode for test compatibility.
+    """
     return PreyDetector(
         engine=mock_engine,
         thresholds={"cat": 0.55, "rodent": 0.45},
+        prey_confirmation_mode="frame_count",  # Legacy mode for tests
         window_size=5,
         trigger_count=3,
         spatial_validation_enabled=True,
@@ -93,13 +97,33 @@ def prey_detector(mock_engine):
 
 @pytest.fixture
 def prey_detector_no_spatial(mock_engine):
-    """Create a PreyDetector with spatial validation disabled (v3: cat + rodent only)."""
+    """Create a PreyDetector with spatial validation disabled (v3: cat + rodent only).
+
+    Uses legacy frame_count mode for test compatibility.
+    """
     return PreyDetector(
         engine=mock_engine,
         thresholds={"cat": 0.55, "rodent": 0.45},
+        prey_confirmation_mode="frame_count",  # Legacy mode for tests
         window_size=5,
         trigger_count=3,
         spatial_validation_enabled=False,
+        box_expansion=0.25,
+    )
+
+
+@pytest.fixture
+def prey_detector_score_accumulation(mock_engine):
+    """Create a PreyDetector with score accumulation mode (v3 default)."""
+    return PreyDetector(
+        engine=mock_engine,
+        thresholds={"cat": 0.50, "rodent": 0.20},
+        prey_confirmation_mode="score_accumulation",
+        prey_window_seconds=3.0,
+        prey_score_threshold=0.9,
+        prey_min_detection_score=0.20,
+        reset_on_cat_lost_seconds=1.5,
+        spatial_validation_enabled=True,
         box_expansion=0.25,
     )
 

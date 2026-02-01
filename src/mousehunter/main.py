@@ -649,7 +649,7 @@ async def app() -> None:
 
 def main() -> None:
     """CLI entry point."""
-    print("=== MouseHunter v2.0 ===")
+    print("=== MouseHunter v3.0 ===")
     print("Cat Prey Detection & Interdiction System")
     print("Raspberry Pi 5 + Hailo-8L")
     print()
