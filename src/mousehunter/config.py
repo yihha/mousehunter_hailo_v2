@@ -159,18 +159,50 @@ class InferenceConfig(BaseSettings):
         description="Expand cat box by this factor for intersection check",
     )
 
-    # Temporal smoothing (rolling window)
+    # Prey confirmation (time-based score accumulation)
+    prey_confirmation_mode: str = Field(
+        default=_json_config.get("inference", {}).get("prey_confirmation", {}).get(
+            "mode", "score_accumulation"
+        ),
+        description="Confirmation mode: 'score_accumulation' or 'frame_count' (legacy)",
+    )
+    prey_window_seconds: float = Field(
+        default=_json_config.get("inference", {}).get("prey_confirmation", {}).get(
+            "window_seconds", 3.0
+        ),
+        description="Time window in seconds for prey score accumulation",
+    )
+    prey_score_threshold: float = Field(
+        default=_json_config.get("inference", {}).get("prey_confirmation", {}).get(
+            "score_threshold", 0.9
+        ),
+        description="Accumulated score threshold to confirm prey",
+    )
+    prey_min_detection_score: float = Field(
+        default=_json_config.get("inference", {}).get("prey_confirmation", {}).get(
+            "min_detection_score", 0.20
+        ),
+        description="Minimum detection score to count towards accumulation",
+    )
+    reset_on_cat_lost_seconds: float = Field(
+        default=_json_config.get("inference", {}).get("prey_confirmation", {}).get(
+            "reset_on_cat_lost_seconds", 1.5
+        ),
+        description="Reset prey monitoring if no cat detected for this duration",
+    )
+
+    # Legacy temporal smoothing (frame-based rolling window)
     window_size: int = Field(
         default=_json_config.get("inference", {}).get("temporal_smoothing", {}).get(
             "window_size", 5
         ),
-        description="Rolling window size for detection smoothing",
+        description="Legacy: Rolling window size for detection smoothing",
     )
     trigger_count: int = Field(
         default=_json_config.get("inference", {}).get("temporal_smoothing", {}).get(
             "trigger_count", 3
         ),
-        description="Number of positive detections in window to trigger",
+        description="Legacy: Number of positive detections in window to trigger",
     )
 
     @field_validator("thresholds")

@@ -1,20 +1,23 @@
 """
-Prey Detector - Hierarchical spatial prey detection with temporal smoothing
+Prey Detector - Hierarchical spatial prey detection with time-based score accumulation
 
 Implements the "Cat as Anchor" detection strategy:
 1. Cat must be detected (high confidence anchor)
-2. Prey (rodent) must be detected (v3: bird removed for better quantization)
-3. Prey must spatially intersect with cat (carrying validation)
-4. Uses rolling window (3-of-5) instead of consecutive frames
+2. Prey (rodent) must be detected with spatial validation
+3. Uses time-based score accumulation instead of frame counting
+   - More robust for sporadic/inconsistent detections
+   - Based on radar tracking best practices (score-based confirmation)
 
-This approach dramatically reduces false positives from:
-- Random objects detected as "rodent" elsewhere in frame
-- Single-frame detection glitches
-- Shadows, toys, or other non-prey objects
+Detection flow:
+- Cat detected → Start monitoring window
+- Each rodent detection → Add confidence to accumulated score
+- Score >= threshold within window → CONFIRM PREY
+- No cat for N seconds → Reset monitoring
 """
 
 import logging
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -32,8 +35,9 @@ logger = logging.getLogger(__name__)
 class DetectionState(Enum):
     """States for the prey detection state machine."""
 
-    IDLE = auto()  # No detection, monitoring
-    VERIFYING = auto()  # Potential detection, accumulating evidence
+    IDLE = auto()  # No cat detected, not monitoring
+    MONITORING = auto()  # Cat detected, monitoring for prey
+    VERIFYING = auto()  # Prey detected, accumulating score
     CONFIRMED = auto()  # Prey confirmed, trigger actions
 
 
@@ -52,12 +56,22 @@ class SpatialMatch:
 
 
 @dataclass
+class PreyScoreEntry:
+    """A single prey detection with timestamp for score accumulation."""
+    timestamp: float  # time.time()
+    confidence: float
+    detection: Detection
+
+
+@dataclass
 class PreyDetectionEvent:
     """Event data when prey is confirmed."""
 
     timestamp: datetime
-    detections_in_window: int
-    window_size: int
+    accumulated_score: float
+    score_threshold: float
+    detection_count: int
+    window_seconds: float
     confidence: float
     cat_detection: Detection
     prey_detection: Detection
@@ -67,8 +81,10 @@ class PreyDetectionEvent:
         """Convert to dictionary."""
         return {
             "timestamp": self.timestamp.isoformat(),
-            "detections_in_window": self.detections_in_window,
-            "window_size": self.window_size,
+            "accumulated_score": self.accumulated_score,
+            "score_threshold": self.score_threshold,
+            "detection_count": self.detection_count,
+            "window_seconds": self.window_seconds,
             "confidence": self.confidence,
             "cat": self.cat_detection.to_dict(),
             "prey": self.prey_detection.to_dict(),
@@ -89,26 +105,35 @@ class FrameResult:
 
 class PreyDetector:
     """
-    Hierarchical spatial prey detector with temporal smoothing.
+    Hierarchical spatial prey detector with time-based score accumulation.
 
     Detection strategy:
-    1. Anchor: Detect cat with high confidence (98% mAP)
+    1. Anchor: Detect cat with high confidence
     2. Filter: Detect prey (rodent) with class-specific thresholds
     3. Validate: Prey must spatially intersect expanded cat bounding box
-    4. Smooth: Use rolling window (3-of-5) to filter temporal noise
+    4. Confirm: Accumulate prey confidence scores over time window
+       - Triggers when accumulated score >= threshold
+       - More robust for sporadic detections than frame counting
     """
 
-    # Prey classes to detect (v3: rodent only, bird removed for better quantization)
+    # Prey classes to detect (v3: rodent only)
     PREY_CLASSES = {"rodent"}
 
     def __init__(
         self,
         engine: HailoEngine | None = None,
         thresholds: dict[str, float] | None = None,
-        window_size: int = 5,
-        trigger_count: int = 3,
         spatial_validation_enabled: bool = True,
         box_expansion: float = 0.25,
+        # Time-based score accumulation (new approach)
+        prey_confirmation_mode: str = "score_accumulation",
+        prey_window_seconds: float = 3.0,
+        prey_score_threshold: float = 0.9,
+        prey_min_detection_score: float = 0.20,
+        reset_on_cat_lost_seconds: float = 1.5,
+        # Legacy frame-based (kept for backwards compatibility)
+        window_size: int = 5,
+        trigger_count: int = 3,
     ):
         """
         Initialize the prey detector.
@@ -116,21 +141,38 @@ class PreyDetector:
         Args:
             engine: Hailo inference engine (created if not provided)
             thresholds: Per-class confidence thresholds
-            window_size: Rolling window size for temporal smoothing
-            trigger_count: Positive detections required in window to trigger
             spatial_validation_enabled: Require prey near cat
             box_expansion: Expand cat box by this factor for intersection
+
+            # Score accumulation parameters (recommended)
+            prey_confirmation_mode: "score_accumulation" or "frame_count" (legacy)
+            prey_window_seconds: Time window for score accumulation
+            prey_score_threshold: Accumulated score needed to confirm
+            prey_min_detection_score: Minimum detection score to count
+            reset_on_cat_lost_seconds: Reset if no cat for this duration
+
+            # Legacy parameters (for backwards compatibility)
+            window_size: Rolling window size (legacy frame_count mode)
+            trigger_count: Positive detections required (legacy frame_count mode)
         """
-        self.thresholds = thresholds or {"cat": 0.55, "rodent": 0.45}
-        self.window_size = window_size
-        self.trigger_count = trigger_count
+        self.thresholds = thresholds or {"cat": 0.50, "rodent": 0.20}
         self.spatial_validation_enabled = spatial_validation_enabled
         self.box_expansion = box_expansion
+
+        # Score accumulation config
+        self.confirmation_mode = prey_confirmation_mode
+        self.prey_window_seconds = prey_window_seconds
+        self.prey_score_threshold = prey_score_threshold
+        self.prey_min_detection_score = prey_min_detection_score
+        self.reset_on_cat_lost_seconds = reset_on_cat_lost_seconds
+
+        # Legacy config (for frame_count mode)
+        self.window_size = window_size
+        self.trigger_count = trigger_count
 
         # Inference engine
         if engine is None:
             from .hailo_engine import get_hailo_engine
-
             engine = get_hailo_engine()
         self.engine = engine
 
@@ -138,8 +180,12 @@ class PreyDetector:
         self._state = DetectionState.IDLE
         self._lock = threading.Lock()
 
-        # Rolling window for temporal smoothing
-        # Stores True/False for each frame (prey detected or not)
+        # Time-based score accumulation
+        self._prey_scores: list[PreyScoreEntry] = []  # Recent prey detections with timestamps
+        self._last_cat_time: float | None = None  # Last time cat was detected
+        self._monitoring_start_time: float | None = None  # When monitoring started
+
+        # Legacy: Rolling window for frame-based mode
         self._detection_window: deque[bool] = deque(maxlen=window_size)
 
         # Store last valid match for event reporting
@@ -153,8 +199,9 @@ class PreyDetector:
         self._on_state_change_callbacks: list[Callable[[DetectionState], None]] = []
 
         logger.info(
-            f"PreyDetector initialized: thresholds={thresholds}, "
-            f"window={window_size}, trigger={trigger_count}, "
+            f"PreyDetector initialized: mode={prey_confirmation_mode}, "
+            f"thresholds={thresholds}, window={prey_window_seconds}s, "
+            f"score_threshold={prey_score_threshold}, "
             f"spatial={spatial_validation_enabled}, expansion={box_expansion}"
         )
 
@@ -164,13 +211,32 @@ class PreyDetector:
         return self._state
 
     @property
+    def accumulated_score(self) -> float:
+        """Get current accumulated prey score within window."""
+        now = time.time()
+        valid_scores = [
+            entry.confidence for entry in self._prey_scores
+            if now - entry.timestamp < self.prey_window_seconds
+        ]
+        return sum(valid_scores)
+
+    @property
+    def detection_count_in_window(self) -> int:
+        """Get count of prey detections in current window."""
+        now = time.time()
+        return sum(
+            1 for entry in self._prey_scores
+            if now - entry.timestamp < self.prey_window_seconds
+        )
+
+    @property
     def positive_count(self) -> int:
-        """Get count of positive detections in current window."""
+        """Legacy: Get count of positive detections in frame window."""
         return sum(self._detection_window)
 
     @property
     def window_fill(self) -> int:
-        """Get number of frames in window."""
+        """Legacy: Get number of frames in window."""
         return len(self._detection_window)
 
     def process_frame(
@@ -197,8 +263,11 @@ class PreyDetector:
         # Evaluate frame with spatial logic
         frame_result = self._evaluate_frame(result)
 
-        # Update rolling window and state machine
-        self._update_state(frame_result, frame)
+        # Update state based on confirmation mode
+        if self.confirmation_mode == "score_accumulation":
+            self._update_state_score_accumulation(frame_result, frame)
+        else:
+            self._update_state_frame_count(frame_result, frame)
 
         return result
 
@@ -274,13 +343,6 @@ class PreyDetector:
         Uses relaxed intersection:
         1. Direct overlap between boxes
         2. Prey center within expanded cat box
-
-        Args:
-            cat: Cat detection
-            prey: Prey detection
-
-        Returns:
-            SpatialMatch if valid, None otherwise
         """
         cat_box = cat.bbox
         prey_box = prey.bbox
@@ -296,9 +358,111 @@ class PreyDetector:
 
         return None
 
-    def _update_state(self, frame_result: FrameResult, frame: np.ndarray) -> None:
-        """Update detection state based on frame result and rolling window."""
-        # Collect callbacks to invoke outside the lock (prevents deadlock)
+    def _update_state_score_accumulation(
+        self, frame_result: FrameResult, frame: np.ndarray
+    ) -> None:
+        """Update detection state using time-based score accumulation."""
+        now = time.time()
+        pending_callbacks: list[tuple[Callable, tuple]] = []
+
+        with self._lock:
+            # Clean up old prey scores outside window
+            self._prey_scores = [
+                entry for entry in self._prey_scores
+                if now - entry.timestamp < self.prey_window_seconds
+            ]
+
+            # Handle cat presence
+            if frame_result.has_cat:
+                self._last_cat_time = now
+
+                # Start monitoring if not already
+                if self._state == DetectionState.IDLE:
+                    self._state = DetectionState.MONITORING
+                    self._monitoring_start_time = now
+                    logger.info("State: IDLE -> MONITORING (cat detected)")
+                    pending_callbacks.extend(
+                        [(cb, (DetectionState.MONITORING,)) for cb in self._on_state_change_callbacks]
+                    )
+
+                # Handle prey detection
+                if frame_result.has_valid_prey and frame_result.prey_detection:
+                    prey = frame_result.prey_detection
+
+                    # Only count if above minimum score
+                    if prey.confidence >= self.prey_min_detection_score:
+                        # Add to score accumulation
+                        self._prey_scores.append(PreyScoreEntry(
+                            timestamp=now,
+                            confidence=prey.confidence,
+                            detection=prey,
+                        ))
+
+                        # Store match
+                        if frame_result.match:
+                            self._last_match = frame_result.match
+
+                        # Calculate accumulated score
+                        accumulated = sum(e.confidence for e in self._prey_scores)
+                        detection_count = len(self._prey_scores)
+
+                        logger.debug(
+                            f"Prey score: +{prey.confidence:.2f}, "
+                            f"accumulated={accumulated:.2f}/{self.prey_score_threshold}, "
+                            f"count={detection_count}"
+                        )
+
+                        # Transition to VERIFYING if we have any score
+                        if self._state == DetectionState.MONITORING:
+                            self._state = DetectionState.VERIFYING
+                            logger.info("State: MONITORING -> VERIFYING (prey detected)")
+                            pending_callbacks.extend(
+                                [(cb, (DetectionState.VERIFYING,)) for cb in self._on_state_change_callbacks]
+                            )
+
+                        # Check if threshold reached
+                        if accumulated >= self.prey_score_threshold:
+                            if self._state != DetectionState.CONFIRMED:
+                                event = self._create_confirmation_event(
+                                    frame, accumulated, detection_count
+                                )
+                                if event:
+                                    pending_callbacks.extend(
+                                        [(cb, (event,)) for cb in self._on_prey_confirmed_callbacks]
+                                    )
+
+            else:
+                # No cat detected
+                if self._last_cat_time is not None:
+                    time_since_cat = now - self._last_cat_time
+
+                    # Reset if cat lost for too long
+                    if time_since_cat >= self.reset_on_cat_lost_seconds:
+                        if self._state != DetectionState.IDLE:
+                            old_state = self._state
+                            self._state = DetectionState.IDLE
+                            self._prey_scores.clear()
+                            self._last_match = None
+                            self._monitoring_start_time = None
+                            logger.info(
+                                f"State: {old_state.name} -> IDLE "
+                                f"(cat lost for {time_since_cat:.1f}s)"
+                            )
+                            pending_callbacks.extend(
+                                [(cb, (DetectionState.IDLE,)) for cb in self._on_state_change_callbacks]
+                            )
+
+        # Invoke callbacks OUTSIDE the lock
+        for callback, args in pending_callbacks:
+            try:
+                callback(*args)
+            except Exception as e:
+                logger.error(f"Callback error: {e}")
+
+    def _update_state_frame_count(
+        self, frame_result: FrameResult, frame: np.ndarray
+    ) -> None:
+        """Legacy: Update detection state using frame-based counting."""
         pending_callbacks: list[tuple[Callable, tuple]] = []
 
         with self._lock:
@@ -320,62 +484,41 @@ class PreyDetector:
 
             # State transitions based on window
             if positive_count >= self.trigger_count:
-                # Enough evidence - confirm prey
                 if self._state != DetectionState.CONFIRMED:
-                    # Prepare prey confirmation (callbacks invoked after lock release)
-                    event = self._prepare_prey_confirmation(frame, positive_count)
+                    event = self._create_legacy_confirmation_event(frame, positive_count)
                     if event:
                         pending_callbacks.extend(
                             [(cb, (event,)) for cb in self._on_prey_confirmed_callbacks]
                         )
             elif positive_count > 0:
-                # Some evidence - verifying
                 if self._state == DetectionState.IDLE:
                     self._state = DetectionState.VERIFYING
-                    logger.info(f"State transition: IDLE -> VERIFYING")
+                    logger.info("State transition: IDLE -> VERIFYING")
                     pending_callbacks.extend(
                         [(cb, (DetectionState.VERIFYING,)) for cb in self._on_state_change_callbacks]
                     )
             else:
-                # No evidence - idle
                 if self._state == DetectionState.VERIFYING:
                     self._state = DetectionState.IDLE
                     self._last_match = None
-                    logger.info(f"State transition: VERIFYING -> IDLE")
+                    logger.info("State transition: VERIFYING -> IDLE")
                     pending_callbacks.extend(
                         [(cb, (DetectionState.IDLE,)) for cb in self._on_state_change_callbacks]
                     )
 
-        # Invoke callbacks OUTSIDE the lock to prevent deadlock
+        # Invoke callbacks OUTSIDE the lock
         for callback, args in pending_callbacks:
             try:
                 callback(*args)
             except Exception as e:
                 logger.error(f"Callback error: {e}")
 
-    def _transition_to(self, new_state: DetectionState) -> list[tuple[Callable, tuple]]:
-        """
-        Transition to a new state.
-
-        Returns list of (callback, args) tuples to be invoked OUTSIDE the lock.
-        """
-        old_state = self._state
-        self._state = new_state
-        logger.info(f"State transition: {old_state.name} -> {new_state.name}")
-
-        # Return callbacks to be invoked outside the lock
-        return [(cb, (new_state,)) for cb in self._on_state_change_callbacks]
-
-    def _prepare_prey_confirmation(
-        self, frame: np.ndarray, positive_count: int
+    def _create_confirmation_event(
+        self, frame: np.ndarray, accumulated_score: float, detection_count: int
     ) -> PreyDetectionEvent | None:
-        """
-        Prepare prey confirmation event (called while holding lock).
-
-        Returns the event to be passed to callbacks OUTSIDE the lock.
-        """
+        """Create prey confirmation event for score accumulation mode."""
         self._state = DetectionState.CONFIRMED
-        logger.info(f"State transition: {self._state.name} -> CONFIRMED")
+        logger.info(f"State: VERIFYING -> CONFIRMED")
 
         if self._last_match is None:
             logger.error("Prey confirmed but no match stored")
@@ -383,8 +526,10 @@ class PreyDetector:
 
         event = PreyDetectionEvent(
             timestamp=datetime.now(),
-            detections_in_window=positive_count,
-            window_size=self.window_size,
+            accumulated_score=accumulated_score,
+            score_threshold=self.prey_score_threshold,
+            detection_count=detection_count,
+            window_seconds=self.prey_window_seconds,
             confidence=self._last_match.confidence,
             cat_detection=self._last_match.cat,
             prey_detection=self._last_match.prey,
@@ -392,10 +537,41 @@ class PreyDetector:
         )
 
         logger.warning(
-            f"PREY CONFIRMED! {positive_count}/{self.window_size} frames, "
+            f"PREY CONFIRMED! score={accumulated_score:.2f}/{self.prey_score_threshold}, "
+            f"detections={detection_count} in {self.prey_window_seconds}s window, "
             f"prey={self._last_match.prey.class_name} "
-            f"({self._last_match.prey.confidence:.2f}), "
-            f"cat=({self._last_match.cat.confidence:.2f})"
+            f"({self._last_match.prey.confidence:.2f})"
+        )
+
+        return event
+
+    def _create_legacy_confirmation_event(
+        self, frame: np.ndarray, positive_count: int
+    ) -> PreyDetectionEvent | None:
+        """Create prey confirmation event for legacy frame_count mode."""
+        self._state = DetectionState.CONFIRMED
+        logger.info(f"State: -> CONFIRMED (legacy mode)")
+
+        if self._last_match is None:
+            logger.error("Prey confirmed but no match stored")
+            return None
+
+        event = PreyDetectionEvent(
+            timestamp=datetime.now(),
+            accumulated_score=float(positive_count),
+            score_threshold=float(self.trigger_count),
+            detection_count=positive_count,
+            window_seconds=0.0,  # Not applicable in frame mode
+            confidence=self._last_match.confidence,
+            cat_detection=self._last_match.cat,
+            prey_detection=self._last_match.prey,
+            frame=frame.copy(),
+        )
+
+        logger.warning(
+            f"PREY CONFIRMED! (legacy) {positive_count}/{self.window_size} frames, "
+            f"prey={self._last_match.prey.class_name} "
+            f"({self._last_match.prey.confidence:.2f})"
         )
 
         return event
@@ -406,15 +582,18 @@ class PreyDetector:
 
         with self._lock:
             self._detection_window.clear()
+            self._prey_scores.clear()
             self._last_match = None
+            self._last_cat_time = None
+            self._monitoring_start_time = None
+
             if self._state != DetectionState.IDLE:
                 old_state = self._state
                 self._state = DetectionState.IDLE
-                logger.info(f"State transition: {old_state.name} -> IDLE (reset)")
+                logger.info(f"State: {old_state.name} -> IDLE (reset)")
                 pending_callbacks = [
                     (cb, (DetectionState.IDLE,)) for cb in self._on_state_change_callbacks
                 ]
-            logger.info("PreyDetector reset to IDLE")
 
         # Invoke callbacks OUTSIDE the lock
         for callback, args in pending_callbacks:
@@ -435,10 +614,18 @@ class PreyDetector:
         """Get detector status."""
         return {
             "state": self._state.name,
+            "confirmation_mode": self.confirmation_mode,
+            # Score accumulation status
+            "accumulated_score": self.accumulated_score,
+            "score_threshold": self.prey_score_threshold,
+            "detection_count_in_window": self.detection_count_in_window,
+            "window_seconds": self.prey_window_seconds,
+            # Legacy status
             "window_fill": self.window_fill,
             "positive_count": self.positive_count,
             "window_size": self.window_size,
             "trigger_count": self.trigger_count,
+            # Config
             "thresholds": self.thresholds,
             "spatial_validation": self.spatial_validation_enabled,
             "box_expansion": self.box_expansion,
@@ -473,10 +660,17 @@ def _create_default_detector() -> PreyDetector:
 
         return PreyDetector(
             thresholds=inference_config.thresholds,
-            window_size=inference_config.window_size,
-            trigger_count=inference_config.trigger_count,
             spatial_validation_enabled=inference_config.spatial_validation_enabled,
             box_expansion=inference_config.box_expansion,
+            # Score accumulation params
+            prey_confirmation_mode=inference_config.prey_confirmation_mode,
+            prey_window_seconds=inference_config.prey_window_seconds,
+            prey_score_threshold=inference_config.prey_score_threshold,
+            prey_min_detection_score=inference_config.prey_min_detection_score,
+            reset_on_cat_lost_seconds=inference_config.reset_on_cat_lost_seconds,
+            # Legacy params
+            window_size=inference_config.window_size,
+            trigger_count=inference_config.trigger_count,
         )
     except ImportError:
         logger.warning("Config not available, using defaults")
@@ -498,20 +692,24 @@ def get_prey_detector() -> PreyDetector:
 def test_detector() -> None:
     """Test the prey detector with simulated detections."""
     logging.basicConfig(level=logging.DEBUG)
-    print("=== Prey Detector Test (Spatial + Rolling Window) ===")
+    print("=== Prey Detector Test (Score Accumulation) ===")
 
     detector = PreyDetector(
-        thresholds={"cat": 0.55, "rodent": 0.45},
-        window_size=5,
-        trigger_count=3,
+        thresholds={"cat": 0.50, "rodent": 0.20},
+        prey_confirmation_mode="score_accumulation",
+        prey_window_seconds=3.0,
+        prey_score_threshold=0.9,
+        prey_min_detection_score=0.20,
+        reset_on_cat_lost_seconds=1.5,
         spatial_validation_enabled=True,
         box_expansion=0.25,
     )
 
     def on_prey(event: PreyDetectionEvent):
         print(f"\n*** PREY ALERT! ***")
-        print(f"  Prey: {event.prey_detection.class_name} ({event.confidence:.2f})")
-        print(f"  Window: {event.detections_in_window}/{event.window_size}")
+        print(f"  Prey: {event.prey_detection.class_name}")
+        print(f"  Score: {event.accumulated_score:.2f}/{event.score_threshold}")
+        print(f"  Detections: {event.detection_count} in {event.window_seconds}s")
 
     def on_state(state: DetectionState):
         print(f"State -> {state.name}")
@@ -520,12 +718,15 @@ def test_detector() -> None:
     detector.on_state_change(on_state)
 
     print("\nProcessing test frames...")
+    print(f"Config: window={detector.prey_window_seconds}s, "
+          f"threshold={detector.prey_score_threshold}")
+
     for i in range(20):
         frame = np.random.randint(0, 255, (640, 640, 3), dtype=np.uint8)
         result = detector.process_frame(frame)
         print(
             f"Frame {i+1}: {len(result.detections)} detections, "
-            f"window={detector.positive_count}/{detector.window_fill}, "
+            f"score={detector.accumulated_score:.2f}/{detector.prey_score_threshold}, "
             f"state={detector.state.name}"
         )
 

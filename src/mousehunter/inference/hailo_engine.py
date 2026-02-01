@@ -329,16 +329,6 @@ class HailoEngine:
         """
         detections = []
 
-        # Debug: Show output format on first few frames
-        if self._frame_count < 3:
-            print(f"[DEBUG] _postprocess_yolo: output type={type(raw_output).__name__}")
-            if isinstance(raw_output, dict):
-                print(f"[DEBUG]   dict keys: {list(raw_output.keys())[:6]}...")
-            elif isinstance(raw_output, (list, tuple)):
-                print(f"[DEBUG]   list/tuple length: {len(raw_output)}")
-                if len(raw_output) > 0 and isinstance(raw_output[0], np.ndarray):
-                    print(f"[DEBUG]   first element shape: {raw_output[0].shape}")
-
         # Handle dict output
         if isinstance(raw_output, dict):
             # Check if it's raw tensors (6 outputs) or single NMS'd output
@@ -450,11 +440,6 @@ class HailoEngine:
             for k, v in outputs.items():
                 if isinstance(v, np.ndarray):
                     logger.info(f"  '{k}': shape={v.shape}, dtype={v.dtype}")
-            # Also print to stdout for visibility in tests
-            print(f"[DEBUG] Raw outputs: {len(outputs)} items")
-            for k, v in outputs.items():
-                if isinstance(v, np.ndarray):
-                    print(f"[DEBUG]   '{k}': shape={v.shape}, dtype={v.dtype}")
 
         # Try to match tensors by name first (more reliable)
         # Expected names: bbox_scale0/cls_scale0, bbox_scale1/cls_scale1, bbox_scale2/cls_scale2
@@ -515,26 +500,11 @@ class HailoEngine:
 
         if not class_tensors_by_scale:
             logger.warning("Could not identify class score tensors")
-            # Print diagnostic info
-            print(f"[DEBUG] TENSOR MATCHING FAILED - Diagnostics:")
-            print(f"[DEBUG]   num_classes={num_classes}, reg_max={self.reg_max}")
-            print(f"[DEBUG]   expected_box_channels={4 * self.reg_max}")
-            print(f"[DEBUG]   box_tensors found: {list(box_tensors_by_scale.keys())}")
-            print(f"[DEBUG]   class_tensors found: {list(class_tensors_by_scale.keys())}")
-            for name, tensor in outputs.items():
-                if isinstance(tensor, np.ndarray):
-                    norm = self._normalize_tensor_format(tensor, num_classes)
-                    if norm is not None:
-                        print(f"[DEBUG]   tensor '{name}': raw={tensor.shape} -> norm={norm.shape}")
-                    else:
-                        print(f"[DEBUG]   tensor '{name}': raw={tensor.shape} -> NORMALIZE FAILED")
             return detections
 
         if self._frame_count < 3:
             logger.info(f"Matched tensors - boxes: {list(box_tensors_by_scale.keys())}, "
                        f"classes: {list(class_tensors_by_scale.keys())}")
-            print(f"[DEBUG] Matched tensors - boxes: {list(box_tensors_by_scale.keys())}, "
-                  f"classes: {list(class_tensors_by_scale.keys())}")
 
         # Process each scale
         all_boxes = []
