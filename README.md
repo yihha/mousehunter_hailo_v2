@@ -173,8 +173,36 @@ Edit `config/config.json` or use environment variables:
         "lockdown_duration_seconds": 300
     },
     "inference": {
-        "confidence_threshold": 0.60,
-        "consecutive_frames_required": 3
+        "model_path": "models/yolov8n_catprey.hef",
+        "classes": {"0": "cat", "1": "rodent"},
+        "reg_max": 8,
+        "thresholds": {
+            "cat": 0.50,
+            "rodent": 0.20
+        },
+        "spatial_validation": {
+            "enabled": true,
+            "box_expansion": 0.25
+        },
+        "prey_confirmation": {
+            "mode": "score_accumulation",
+            "window_seconds": 3.0,
+            "score_threshold": 0.9,
+            "min_detection_score": 0.20,
+            "reset_on_cat_lost_seconds": 1.5
+        }
+    },
+    "cloud_storage": {
+        "enabled": false,
+        "rclone_remote": "",
+        "remote_path": "MouseHunter"
+    },
+    "training_data": {
+        "enabled": false,
+        "periodic_interval_minutes": 30,
+        "capture_cat_only": true,
+        "capture_near_miss": true,
+        "max_images_per_day": 100
     }
 }
 ```
@@ -208,17 +236,27 @@ Default: `http://localhost:8080`
 ## State Machine
 
 ```
-IDLE -----> VERIFYING -----> LOCKDOWN -----> COOLDOWN -----> IDLE
-  ^              |                |                             |
-  |              |                |                             |
-  +--------------+----------------+-----------------------------+
-       (no prey)      (auto-timeout)        (cooldown complete)
+IDLE -----> MONITORING -----> VERIFYING -----> LOCKDOWN -----> COOLDOWN -----> IDLE
+  ^              |                 |                |                             |
+  |              |                 |                |                             |
+  +--------------+-----------------+----------------+-----------------------------+
+       (cat lost)      (no prey)      (auto-timeout)        (cooldown complete)
 ```
 
-- **IDLE**: Normal monitoring, processing frames
-- **VERIFYING**: Potential prey detected, requiring N consecutive frames
-- **LOCKDOWN**: Prey confirmed, jammer active, notifications sent
+### Cat-as-Anchor Strategy
+The system uses a "cat-as-anchor" approach - prey is only confirmed when detected near a cat:
+
+- **IDLE**: No cat detected, waiting for cat
+- **MONITORING**: Cat detected, now watching for prey
+- **VERIFYING**: Prey detected near cat, accumulating confidence score
+- **LOCKDOWN**: Prey confirmed (score ≥ 0.9), jammer active, notifications sent
 - **COOLDOWN**: Post-lockdown period before returning to normal
+
+### Score Accumulation
+Instead of requiring consecutive frames, the system uses time-based score accumulation:
+1. Each prey detection within a 3-second window adds its confidence to the accumulated score
+2. When accumulated score reaches threshold (0.9), prey is confirmed
+3. If cat is lost for 1.5 seconds, score resets to zero
 
 ## Architecture
 
@@ -231,12 +269,16 @@ main.py (Async Controller)
     |
     +-- inference/ (Hailo-8L)
     |       |-- hailo_engine.py
-    |       |-- prey_detector.py
+    |       |-- prey_detector.py (State machine + score accumulation)
     |       +-- detection.py
     |
     +-- hardware/
     |       |-- jammer.py (GPIO Relay)
     |       +-- audio.py (USB Audio)
+    |
+    +-- storage/
+    |       |-- cloud_upload.py (rclone integration)
+    |       +-- training_data.py (Capture for model improvement)
     |
     +-- notifications/
     |       +-- telegram_bot.py
@@ -385,42 +427,42 @@ pinctrl get 17
 ## Custom Model Training & Deployment
 
 ### Overview
-The default model uses COCO classes (80 classes). For better detection accuracy, you can train a custom YOLOv8n model with your own dataset.
+The system uses a custom-trained YOLOv8n model optimized for cat and prey detection. The model is trained with `reg_max=8` for better INT8 quantization on Hailo-8L.
 
-### Custom Model Classes
-Our custom-trained model has 4 classes:
+### Current Model (v3)
 | Class ID | Name   |
 |----------|--------|
 | 0        | cat    |
 | 1        | rodent |
-| 2        | leaf   |
-| 3        | bird   |
+
+**Training Results:**
+- mAP50: 0.907
+- Cat mAP50: 0.978
+- Rodent mAP50: 0.796
 
 ### Step 1: Train Model (Google Colab)
 
-1. Prepare dataset with labeled images (cat, rodent, leaf, bird)
-2. Train YOLOv8n in Google Colab:
+1. Prepare dataset with labeled images (cat, rodent)
+2. Train YOLOv8n with reg_max=8 in Google Colab:
 ```python
 from ultralytics import YOLO
 
 # Load pretrained YOLOv8n
 model = YOLO('yolov8n.pt')
 
+# Patch Detect head for reg_max=8
+model.model.model[-1].reg_max = 8
+
 # Train on custom dataset
 model.train(data='cat_prey_dataset/data.yaml', epochs=100, imgsz=640)
-
-# Best model saved at: runs/detect/train/weights/best.pt
 ```
 
-3. Export to ONNX:
-```python
-# Export for Hailo compilation
-!yolo mode=export model="runs/detect/train/weights/best.pt" format=onnx imgsz=640 opset=12
-```
+3. Export to ONNX with 6 separate output tensors (for Hailo):
+   - Use graph surgery to expose cv2 (bbox) and cv3 (class) outputs
+   - See `hailo_build/YOLOv8_CatPrey_Training_for_Hailo_v4.ipynb` for details
 
 4. Download files from Google Drive:
-   - `yolov8n_catprey_best_YYYYMMDD-HHMMSS.pt` (PyTorch weights)
-   - `yolov8n_catprey_best_YYYYMMDD-HHMMSS.onnx` (ONNX model)
+   - `yolov8n_catrodent_reg8_6outputs.onnx` (ONNX with 6 outputs)
 
 ### Step 2: Compile for Hailo-8L
 
@@ -449,21 +491,16 @@ docker run -v /path/to/models:/models hailo/hailo_dfc \
 
 1. Copy the compiled HEF to the Pi:
 ```bash
-scp yolov8n_catprey.hef yi@pi:~/mousehunter_hailo_v2/models/
+scp yolov8n_catprey.hef pi@<PI_IP>:~/mousehunter_hailo_v2/models/
 ```
 
-2. Update `config/config.json`:
+2. Verify `config/config.json` matches model:
 ```json
 {
     "inference": {
         "model_path": "models/yolov8n_catprey.hef",
-        "confidence_threshold": 0.45,
-        "classes": {
-            "0": "cat",
-            "1": "rodent",
-            "2": "leaf",
-            "3": "bird"
-        }
+        "classes": {"0": "cat", "1": "rodent"},
+        "reg_max": 8
     }
 }
 ```
@@ -476,26 +513,95 @@ sudo systemctl restart mousehunter
 ### Step 4: Verify Custom Model
 
 ```bash
-# Check logs for new class names
-journalctl -u mousehunter -n 50 | grep -i "class\|detection"
+# Run hardware test
+python test_hardware.py
+
+# Check logs for detections
+journalctl -u mousehunter -n 50 | grep -i "detection"
 
 # Test inference
-curl -s http://localhost:8080/status | python -m json.tool | grep -A5 classes
+curl -s http://localhost:8080/status | python -m json.tool
 ```
 
 ### Model Files Location
 
 | File | Location | Description |
 |------|----------|-------------|
-| PyTorch weights | Google Drive: `cat_prey/yolo_v8n_models_custom/` | Training checkpoints |
-| ONNX model | Google Drive: `cat_prey/yolo_v8n_models_custom/` | Intermediate format |
+| PyTorch weights | Google Drive: `cat_prey/yolo_v8n_models_v4/` | Training checkpoints |
+| ONNX model | Google Drive: `cat_prey/yolo_v8n_models_v4/` | 6-output format for Hailo |
 | HEF model | Pi: `~/mousehunter_hailo_v2/models/` | Compiled for Hailo-8L |
 
-### Current Trained Model
-- **File**: `yolov8n_catprey_best_20260118-203323.onnx`
-- **Classes**: cat (0), rodent (1), leaf (2), bird (3)
-- **Input size**: 640x640
-- **Status**: Needs HEF compilation for Hailo-8L
+### Current Deployed Model (v3)
+- **File**: `yolov8n_catprey.hef`
+- **Classes**: cat (0), rodent (1)
+- **reg_max**: 8 (optimized for INT8)
+- **Input size**: 640x640 RGB
+- **Outputs**: 6 raw tensors (DFL bbox + class scores)
+
+## Cloud Storage (rclone)
+
+The system can automatically upload evidence and training data to cloud storage using rclone.
+
+### Setup
+
+1. Install rclone:
+```bash
+sudo apt install rclone
+```
+
+2. Configure a remote (e.g., Google Drive):
+```bash
+rclone config
+# Follow prompts to create a remote named "gdrive"
+```
+
+3. Update `config/config.json`:
+```json
+{
+    "cloud_storage": {
+        "enabled": true,
+        "rclone_remote": "gdrive",
+        "remote_path": "MouseHunter",
+        "upload_after_detection": true,
+        "delete_local_after_upload": false
+    }
+}
+```
+
+Directories are created automatically on the remote if they don't exist.
+
+## Training Data Capture
+
+To improve detection accuracy, the system can capture images for model retraining:
+
+### Capture Modes
+
+| Mode | Trigger | Purpose |
+|------|---------|---------|
+| Periodic | Every 30 minutes | Environment baseline images |
+| Cat-Only | Cat present for 2+ seconds, no prey | Normal cat behavior samples |
+| Near-Miss | Verifying state resets without confirmation | Potential false negatives |
+
+### Enable Training Data Capture
+
+```json
+{
+    "training_data": {
+        "enabled": true,
+        "periodic_interval_minutes": 30,
+        "capture_cat_only": true,
+        "cat_only_delay_seconds": 2.0,
+        "capture_near_miss": true,
+        "include_detections_json": true,
+        "max_images_per_day": 100,
+        "use_inference_resolution": true,
+        "local_dir": "runtime/training_data",
+        "remote_path": "MouseHunter/training"
+    }
+}
+```
+
+Images are saved locally and optionally uploaded to cloud storage. Each capture includes a JSON file with detection metadata for labeling assistance.
 
 ## License
 

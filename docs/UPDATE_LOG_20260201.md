@@ -538,4 +538,127 @@ Hardware: Raspberry Pi 5 + Hailo-8L + PiCamera 3 NoIR
 
 ---
 
-*Log updated: February 1, 2026 (Session 4 - Testing & Deployment)*
+## Session 5: Deployment Debugging & Training Data Capture (February 5, 2026)
+
+### Deployment Issue: Telegram Bot Unresponsive
+
+After initial deployment, the Telegram bot stopped responding. Investigation revealed:
+
+**Root Cause:** Application crashed when camera wasn't available, causing systemd restart loop (37 restarts observed).
+
+**Original Code:**
+```python
+def _start_detection_thread(self) -> None:
+    if self._camera is None or self._detector is None:
+        raise RuntimeError("Camera or detector not initialized")
+```
+
+**Fix Applied:** Made detection thread optional, allowing Telegram bot and API to run without camera:
+```python
+def _start_detection_thread(self) -> None:
+    missing = []
+    if self._camera is None:
+        missing.append("camera")
+    if self._detector is None:
+        missing.append("detector")
+    if missing:
+        logger.warning(
+            f"Detection disabled: {', '.join(missing)} not available. "
+            "Telegram bot and API will still run."
+        )
+        return
+```
+
+This enables debugging Telegram/API functionality without requiring camera hardware.
+
+### False Positive Investigation
+
+User reported prey detection (rodent 37%) when only human was present. Analysis:
+- Cat-as-anchor strategy requires cat detection (50%+) before prey can trigger lockdown
+- Low rodent threshold (0.20) can cause false positives on unexpected objects
+- Recommendation: Raise `thresholds.rodent` to 0.30-0.40 after collecting deployment data
+
+### New Feature: Training Data Capture
+
+Implemented comprehensive training data capture system for YOLO model improvement:
+
+**Three Capture Modes:**
+1. **Periodic**: Every 30 minutes, captures environment images regardless of detections
+2. **Cat-Only**: When cat detected for 2+ seconds without prey (requires cat_only_delay_seconds cooldown)
+3. **Near-Miss**: When verifying state resets to idle with accumulated score > 0 (potential false negatives)
+
+**New Files:**
+- `src/mousehunter/storage/training_data.py` - Complete capture module
+
+**Configuration Added to config.json:**
+```json
+"training_data": {
+    "_comment": "Capture images for YOLO model training/improvement",
+    "enabled": false,
+    "periodic_interval_minutes": 30,
+    "capture_cat_only": true,
+    "cat_only_delay_seconds": 2.0,
+    "capture_near_miss": true,
+    "include_detections_json": true,
+    "max_images_per_day": 100,
+    "use_inference_resolution": true,
+    "remote_path": "MouseHunter/training",
+    "local_dir": "runtime/training_data"
+}
+```
+
+**Features:**
+- Daily capture limit (max 100 images/day)
+- Automatic cloud upload via rclone (if configured)
+- Metadata JSON with detection info for each capture
+- Cooldown between captures to avoid duplicates
+- Resolution options: inference (640x640) or main (1920x1080)
+
+**Integration with Prey Detector:**
+Added callback infrastructure for cat-only and near-miss events:
+- `on_cat_only()` - Called when cat present without prey for configured delay
+- `on_near_miss()` - Called when verifying resets without confirmation
+
+### Bug Fixes
+
+| Issue | File | Fix |
+|-------|------|-----|
+| Camera crash | `main.py` | Detection thread now optional |
+| Unused imports | `training_data.py` | Removed `shutil`, `BytesIO` |
+| Null pointer risk | `training_data.py` | Added defensive check for `cat_detection.confidence` |
+| Attribute conflict | `training_data.py` | Renamed `capture_cat_only` to `cat_only_enabled` |
+
+### Git Commits
+
+```
+697cfb9 Update log with Session 4: Testing & Score Accumulation Implementation
+```
+
+Note: Training data capture implementation was completed in this session.
+
+### Cloud Storage Notes
+
+- rclone automatically creates remote directories if they don't exist
+- Configure with `rclone config` to create remote (e.g., "gdrive")
+- Set `rclone_remote` in config to enable uploads
+- Images upload asynchronously to avoid blocking detection loop
+
+---
+
+## Current System Configuration (v3.0.0)
+
+```
+MouseHunter v3.0.0
+Model: YOLOv8n custom (2 classes: cat=0, rodent=1)
+reg_max: 8
+Thresholds: cat=0.50, rodent=0.20
+Confirmation: score_accumulation (3.0s window, 0.9 threshold)
+Spatial validation: enabled (0.25 box expansion)
+Training data capture: available (disabled by default)
+Cloud storage: rclone-based (optional)
+Hardware: Raspberry Pi 5 + Hailo-8L + PiCamera 3 NoIR
+```
+
+---
+
+*Log updated: February 5, 2026 (Session 5 - Deployment Debugging & Training Data)*
