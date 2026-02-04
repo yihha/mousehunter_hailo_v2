@@ -12,11 +12,9 @@ Images are saved with detection metadata for semi-automated labeling.
 import asyncio
 import json
 import logging
-import shutil
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, date
-from io import BytesIO
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
@@ -359,9 +357,13 @@ class TrainingDataCapture:
         if image_path:
             asyncio.create_task(self._upload_image(image_path, "cat_only"))
 
-        logger.info(
-            f"Cat-only capture: cat confidence={cat_detection.confidence:.2f}"
-        )
+            # Log with confidence if available
+            if cat_detection and hasattr(cat_detection, 'confidence'):
+                logger.info(
+                    f"Cat-only capture: cat confidence={cat_detection.confidence:.2f}"
+                )
+            else:
+                logger.info("Cat-only capture saved")
 
         return image_path
 
