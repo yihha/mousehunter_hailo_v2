@@ -197,6 +197,11 @@ class PreyDetector:
         # Callbacks
         self._on_prey_confirmed_callbacks: list[Callable[[PreyDetectionEvent], None]] = []
         self._on_state_change_callbacks: list[Callable[[DetectionState], None]] = []
+        # Training data callbacks
+        self._on_cat_only_callbacks: list[Callable[[Detection, list[Detection], np.ndarray], None]] = []
+        self._on_near_miss_callbacks: list[Callable[[float, list[Detection], np.ndarray], None]] = []
+        self._last_cat_only_callback_time: float = 0
+        self._cat_only_callback_cooldown: float = 5.0  # Minimum seconds between cat-only callbacks
 
         logger.info(
             f"PreyDetector initialized: mode={prey_confirmation_mode}, "
@@ -385,6 +390,19 @@ class PreyDetector:
                         [(cb, (DetectionState.MONITORING,)) for cb in self._on_state_change_callbacks]
                     )
 
+                # Emit cat_only callback if cat detected without valid prey (for training data)
+                if not frame_result.has_valid_prey:
+                    if (self._state == DetectionState.MONITORING and
+                        self._monitoring_start_time and
+                        now - self._monitoring_start_time >= 2.0 and  # Cat present for 2+ seconds
+                        now - self._last_cat_only_callback_time >= self._cat_only_callback_cooldown):
+                        self._last_cat_only_callback_time = now
+                        cat_det = frame_result.cat_detection
+                        all_dets = frame_result.all_detections
+                        pending_callbacks.extend(
+                            [(cb, (cat_det, all_dets, frame)) for cb in self._on_cat_only_callbacks]
+                        )
+
                 # Handle prey detection
                 if frame_result.has_valid_prey and frame_result.prey_detection:
                     prey = frame_result.prey_detection
@@ -440,6 +458,8 @@ class PreyDetector:
                     if time_since_cat >= self.reset_on_cat_lost_seconds:
                         if self._state != DetectionState.IDLE:
                             old_state = self._state
+                            accumulated_before_reset = sum(e.confidence for e in self._prey_scores)
+
                             self._state = DetectionState.IDLE
                             self._prey_scores.clear()
                             self._last_match = None
@@ -451,6 +471,14 @@ class PreyDetector:
                             pending_callbacks.extend(
                                 [(cb, (DetectionState.IDLE,)) for cb in self._on_state_change_callbacks]
                             )
+
+                            # Emit near_miss callback if was VERIFYING with accumulated score
+                            if old_state == DetectionState.VERIFYING and accumulated_before_reset > 0:
+                                all_dets = frame_result.all_detections if frame_result else []
+                                pending_callbacks.extend(
+                                    [(cb, (accumulated_before_reset, all_dets, frame))
+                                     for cb in self._on_near_miss_callbacks]
+                                )
 
         # Invoke callbacks OUTSIDE the lock
         for callback, args in pending_callbacks:
@@ -609,6 +637,28 @@ class PreyDetector:
     def on_state_change(self, callback: Callable[[DetectionState], None]) -> None:
         """Register callback for state changes."""
         self._on_state_change_callbacks.append(callback)
+
+    def on_cat_only(self, callback: Callable[[Detection, list[Detection], np.ndarray], None]) -> None:
+        """
+        Register callback for cat-only detections (cat without prey).
+
+        Useful for collecting training data of cats without prey.
+
+        Args:
+            callback: Function receiving (cat_detection, all_detections, frame)
+        """
+        self._on_cat_only_callbacks.append(callback)
+
+    def on_near_miss(self, callback: Callable[[float, list[Detection], np.ndarray], None]) -> None:
+        """
+        Register callback for near-miss detections (VERIFYING that reset to IDLE).
+
+        Useful for collecting hard negative training data.
+
+        Args:
+            callback: Function receiving (accumulated_score, all_detections, frame)
+        """
+        self._on_near_miss_callbacks.append(callback)
 
     def get_status(self) -> dict:
         """Get detector status."""

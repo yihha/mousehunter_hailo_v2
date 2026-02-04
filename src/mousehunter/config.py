@@ -355,6 +355,55 @@ class RecordingConfig(BaseSettings):
     )
 
 
+class TrainingDataConfig(BaseSettings):
+    """Training data capture configuration for model improvement."""
+
+    model_config = {"env_prefix": "MOUSEHUNTER_TRAINING_"}
+
+    enabled: bool = Field(
+        default=_json_config.get("training_data", {}).get("enabled", False),
+        description="Enable training data capture",
+    )
+    periodic_interval_minutes: int = Field(
+        default=_json_config.get("training_data", {}).get("periodic_interval_minutes", 30),
+        description="Interval for periodic snapshots (0 to disable)",
+    )
+    capture_cat_only: bool = Field(
+        default=_json_config.get("training_data", {}).get("capture_cat_only", True),
+        description="Capture when cat detected without prey",
+    )
+    cat_only_delay_seconds: float = Field(
+        default=_json_config.get("training_data", {}).get("cat_only_delay_seconds", 2.0),
+        description="Delay before capturing cat-only (to ensure stable detection)",
+    )
+    capture_near_miss: bool = Field(
+        default=_json_config.get("training_data", {}).get("capture_near_miss", True),
+        description="Capture when VERIFYING resets to IDLE (almost triggered)",
+    )
+    include_detections_json: bool = Field(
+        default=_json_config.get("training_data", {}).get("include_detections_json", True),
+        description="Include detection metadata (bboxes, confidences) with images",
+    )
+    max_images_per_day: int = Field(
+        default=_json_config.get("training_data", {}).get("max_images_per_day", 100),
+        description="Maximum training images to capture per day (0 for unlimited)",
+    )
+    use_inference_resolution: bool = Field(
+        default=_json_config.get("training_data", {}).get("use_inference_resolution", True),
+        description="Save at inference resolution (640x640) instead of full resolution",
+    )
+    remote_path: str = Field(
+        default=_json_config.get("training_data", {}).get("remote_path", "MouseHunter/training"),
+        description="Remote path for training data (under cloud storage)",
+    )
+    local_dir: str = Field(
+        default=_json_config.get("training_data", {}).get(
+            "local_dir", str(RUNTIME_DIR / "training_data")
+        ),
+        description="Local directory for training data before upload",
+    )
+
+
 class CloudStorageConfig(BaseSettings):
     """Cloud storage configuration for long-term archival via rclone."""
 
@@ -404,6 +453,7 @@ api_config = APIConfig()
 logging_config = LoggingConfig()
 recording_config = RecordingConfig()
 cloud_storage_config = CloudStorageConfig()
+training_data_config = TrainingDataConfig()
 
 
 def setup_logging() -> None:
@@ -442,6 +492,7 @@ def ensure_runtime_dirs() -> None:
         Path(recording_config.output_dir),
         Path(recording_config.evidence_dir),
         Path(logging_config.file).parent,
+        Path(training_data_config.local_dir),
     ]
     for d in dirs:
         d.mkdir(parents=True, exist_ok=True)

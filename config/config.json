@@ -94,5 +94,18 @@
         "retention_days_cloud": 365,
         "bandwidth_limit": "",
         "_setup_instructions": "Run 'rclone config' to create a remote, then set rclone_remote to the remote name (e.g., 'gdrive')"
+    },
+    "training_data": {
+        "_comment": "Capture images for YOLO model training/improvement",
+        "enabled": false,
+        "periodic_interval_minutes": 30,
+        "capture_cat_only": true,
+        "cat_only_delay_seconds": 2.0,
+        "capture_near_miss": true,
+        "include_detections_json": true,
+        "max_images_per_day": 100,
+        "use_inference_resolution": true,
+        "remote_path": "MouseHunter/training",
+        "local_dir": "runtime/training_data"
     }
 }

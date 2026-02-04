@@ -59,6 +59,7 @@ class MouseHunterController:
         self._detector = None
         self._telegram = None
         self._cloud_storage = None
+        self._training_capture = None
 
         # Detection thread
         self._detection_thread: threading.Thread | None = None
@@ -167,6 +168,19 @@ class MouseHunterController:
                     f"Cloud sync task started (interval: {cloud_storage_config.sync_interval_minutes}min)"
                 )
 
+        # Start training data periodic capture if enabled
+        if self._training_capture and self._training_capture.enabled:
+            if self._training_capture.periodic_interval_minutes > 0:
+                task = asyncio.create_task(
+                    self._training_data_periodic_loop(),
+                    name="training_periodic",
+                )
+                self._background_tasks.append(task)
+                logger.info(
+                    f"Training data periodic capture started "
+                    f"(interval: {self._training_capture.periodic_interval_minutes}min)"
+                )
+
         # Start detection pipeline in background thread
         self._start_detection_thread()
 
@@ -265,6 +279,10 @@ class MouseHunterController:
 
             # Register prey detection callback
             self._detector.on_prey_confirmed(self._handle_prey_confirmed)
+
+            # Register training data callbacks (will be connected after training_capture init)
+            self._detector.on_cat_only(self._handle_cat_only)
+            self._detector.on_near_miss(self._handle_near_miss)
             logger.info("Prey detector initialized")
         except Exception as e:
             logger.error(f"Failed to initialize detector: {e}")
@@ -308,6 +326,31 @@ class MouseHunterController:
                 logger.info("Cloud storage initialized")
         except Exception as e:
             logger.error(f"Failed to initialize cloud storage: {e}")
+
+        # Training Data Capture
+        try:
+            from mousehunter.storage.training_data import TrainingDataCapture
+            from mousehunter.config import training_data_config
+
+            if training_data_config.enabled:
+                self._training_capture = TrainingDataCapture(
+                    local_dir=training_data_config.local_dir,
+                    remote_path=training_data_config.remote_path,
+                    periodic_interval_minutes=training_data_config.periodic_interval_minutes,
+                    capture_cat_only=training_data_config.capture_cat_only,
+                    cat_only_delay_seconds=training_data_config.cat_only_delay_seconds,
+                    capture_near_miss=training_data_config.capture_near_miss,
+                    include_detections_json=training_data_config.include_detections_json,
+                    max_images_per_day=training_data_config.max_images_per_day,
+                    use_inference_resolution=training_data_config.use_inference_resolution,
+                    enabled=training_data_config.enabled,
+                )
+                # Link cloud storage for uploads
+                if self._cloud_storage:
+                    self._training_capture.set_cloud_storage(self._cloud_storage)
+                logger.info("Training data capture initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize training data capture: {e}")
 
     def _setup_signal_handlers(self) -> None:
         """Setup signal handlers for graceful shutdown."""
@@ -465,6 +508,54 @@ class MouseHunterController:
         except Exception as e:
             logger.error(f"Lockdown execution failed: {e}", exc_info=True)
 
+    def _handle_cat_only(self, cat_detection, all_detections, frame) -> None:
+        """
+        Handle cat-only detection for training data capture.
+
+        Called from detection thread when cat is detected without prey.
+        """
+        if not self._training_capture or not self._training_capture.enabled:
+            return
+
+        if not self._main_loop:
+            return
+
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._training_capture.capture_cat_only(
+                    frame=frame,
+                    cat_detection=cat_detection,
+                    all_detections=all_detections,
+                ),
+                self._main_loop,
+            )
+        except Exception as e:
+            logger.error(f"Failed to schedule cat_only capture: {e}")
+
+    def _handle_near_miss(self, accumulated_score, all_detections, frame) -> None:
+        """
+        Handle near-miss detection for training data capture.
+
+        Called from detection thread when VERIFYING state resets to IDLE.
+        """
+        if not self._training_capture or not self._training_capture.enabled:
+            return
+
+        if not self._main_loop:
+            return
+
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._training_capture.capture_near_miss(
+                    frame=frame,
+                    accumulated_score=accumulated_score,
+                    all_detections=all_detections,
+                ),
+                self._main_loop,
+            )
+        except Exception as e:
+            logger.error(f"Failed to schedule near_miss capture: {e}")
+
     async def _execute_lockdown(self, image_bytes: bytes | None = None) -> None:
         """Execute lockdown sequence (async)."""
         from mousehunter.config import jammer_config
@@ -526,6 +617,39 @@ class MouseHunterController:
                 break
             except Exception as e:
                 logger.error(f"Cloud sync error: {e}")
+
+    async def _training_data_periodic_loop(self) -> None:
+        """Periodic training data capture loop."""
+        if not self._training_capture:
+            return
+
+        interval_seconds = self._training_capture.periodic_interval_minutes * 60
+
+        while self._running:
+            try:
+                await asyncio.sleep(interval_seconds)
+
+                # Capture periodic training image if camera is available
+                if self._camera and self._camera._started:
+                    frame, timestamp = self._camera.get_inference_frame()
+                    if frame is not None:
+                        # Get current detections if detector is running
+                        detections = None
+                        if self._detector and self._detector._history:
+                            recent = self._detector.get_recent_detections(1)
+                            if recent:
+                                detections = recent[-1].detections
+
+                        await self._training_capture.capture_periodic(frame, detections)
+
+                # Cleanup old local training data (weekly)
+                self._training_capture.cleanup_local(max_age_days=7)
+
+            except asyncio.CancelledError:
+                logger.debug("Training data periodic loop cancelled")
+                break
+            except Exception as e:
+                logger.error(f"Training data periodic capture error: {e}")
 
     async def _state_machine_tick(self) -> None:
         """Periodic state machine update."""
