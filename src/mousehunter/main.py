@@ -322,8 +322,9 @@ class MouseHunterController:
     def _start_detection_thread(self) -> None:
         """Start the detection pipeline in a background thread.
 
-        Raises:
-            RuntimeError: If camera or detector are not available
+        If camera or detector are not available, logs a warning and skips
+        starting the detection thread (allows system to run without camera
+        for debugging Telegram/API).
         """
         missing = []
         if self._camera is None:
@@ -332,9 +333,11 @@ class MouseHunterController:
             missing.append("detector")
 
         if missing:
-            error_msg = f"Cannot start detection: {', '.join(missing)} not available"
-            logger.error(error_msg)
-            raise RuntimeError(error_msg)
+            logger.warning(
+                f"Detection disabled: {', '.join(missing)} not available. "
+                "Telegram bot and API will still run."
+            )
+            return
 
         self._stop_event.clear()
         self._detection_thread = threading.Thread(
