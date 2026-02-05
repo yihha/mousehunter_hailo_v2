@@ -229,13 +229,14 @@ class TrainingDataCapture:
                 f"{capture_type}/{now.year}/{now.month:02d}/{now.day:02d}/"
             )
 
-            # Upload using rclone
+            # Upload using rclone copyto (for single files)
+            remote_file_path = f"{remote_full_path}{image_path.name}"
             success, output = await asyncio.get_running_loop().run_in_executor(
                 None,
-                lambda: self._cloud_storage._run_rclone([
-                    "copy",
-                    str(image_path),
-                    remote_full_path,
+                lambda ip=image_path, rfp=remote_file_path: self._cloud_storage._run_rclone([
+                    "copyto",
+                    str(ip),
+                    rfp,
                 ])
             )
 
@@ -245,12 +246,13 @@ class TrainingDataCapture:
                 # Also upload metadata if exists
                 metadata_path = image_path.with_suffix(".json")
                 if metadata_path.exists():
+                    remote_metadata_path = f"{remote_full_path}{metadata_path.name}"
                     await asyncio.get_running_loop().run_in_executor(
                         None,
-                        lambda: self._cloud_storage._run_rclone([
-                            "copy",
-                            str(metadata_path),
-                            remote_full_path,
+                        lambda mp=metadata_path, rmp=remote_metadata_path: self._cloud_storage._run_rclone([
+                            "copyto",
+                            str(mp),
+                            rmp,
                         ])
                     )
             else:
