@@ -75,6 +75,7 @@ class MouseHunterController:
         self._detection_count = 0
         self._lockdown_count = 0
         self._last_prey_event = None  # Most recent prey detection event
+        self._last_cat_notification_time: float = 0  # For cat detection cooldown
 
         # Callbacks
         self._on_state_change_callbacks: list[Callable[[SystemState], None]] = []
@@ -266,7 +267,7 @@ class MouseHunterController:
 
         # Inference / Prey Detector
         try:
-            from mousehunter.inference.prey_detector import PreyDetector
+            from mousehunter.inference.prey_detector import PreyDetector, DetectionState
             from mousehunter.config import inference_config
 
             self._detector = PreyDetector(
@@ -283,6 +284,9 @@ class MouseHunterController:
             # Register training data callbacks (will be connected after training_capture init)
             self._detector.on_cat_only(self._handle_cat_only)
             self._detector.on_near_miss(self._handle_near_miss)
+
+            # Register cat detection callback for Telegram notifications
+            self._detector.on_state_change(self._handle_detector_state_change)
             logger.info("Prey detector initialized")
         except Exception as e:
             logger.error(f"Failed to initialize detector: {e}")
@@ -555,6 +559,79 @@ class MouseHunterController:
             )
         except Exception as e:
             logger.error(f"Failed to schedule near_miss capture: {e}")
+
+    def _handle_detector_state_change(self, state) -> None:
+        """
+        Handle detector state changes for cat notification.
+
+        Called from detection thread when PreyDetector state changes.
+        Sends Telegram notification when cat is first detected (MONITORING state).
+        """
+        # Import here to get fresh config and avoid circular import
+        from mousehunter.inference.prey_detector import DetectionState
+        from mousehunter.config import telegram_config
+        import time
+
+        # Only notify on MONITORING state (cat just detected)
+        if state != DetectionState.MONITORING:
+            return
+
+        # Check if cat notification is enabled
+        if not telegram_config.notify_on_cat_detected:
+            return
+
+        if not self._telegram:
+            return
+
+        # Check cooldown
+        now = time.time()
+        cooldown_seconds = telegram_config.cat_notification_cooldown_minutes * 60
+        if now - self._last_cat_notification_time < cooldown_seconds:
+            logger.debug(
+                f"Cat notification skipped (cooldown: "
+                f"{cooldown_seconds - (now - self._last_cat_notification_time):.0f}s remaining)"
+            )
+            return
+
+        self._last_cat_notification_time = now
+
+        # Capture image from camera
+        image_bytes = None
+        if self._camera:
+            try:
+                image_bytes = self._camera.capture_snapshot_bytes(quality=85)
+            except Exception as e:
+                logger.error(f"Failed to capture cat notification image: {e}")
+
+        # Schedule async notification on main loop
+        if not self._main_loop:
+            return
+
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._send_cat_notification(image_bytes),
+                self._main_loop,
+            )
+        except Exception as e:
+            logger.error(f"Failed to schedule cat notification: {e}")
+
+    async def _send_cat_notification(self, image_bytes: bytes | None = None) -> None:
+        """Send cat detection notification via Telegram (async)."""
+        if not self._telegram:
+            return
+
+        try:
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            message = f"Cat detected at {timestamp}"
+
+            await self._telegram.send_alert(
+                text=message,
+                image_bytes=image_bytes,
+                include_buttons=False,  # No action buttons for cat-only notification
+            )
+            logger.info("Cat detection notification sent")
+        except Exception as e:
+            logger.error(f"Failed to send cat notification: {e}")
 
     async def _execute_lockdown(self, image_bytes: bytes | None = None) -> None:
         """Execute lockdown sequence (async)."""

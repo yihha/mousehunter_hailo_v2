@@ -3,7 +3,9 @@
     "telegram": {
         "bot_token": "",
         "chat_id": "",
-        "enabled": true
+        "enabled": true,
+        "notify_on_cat_detected": true,
+        "cat_notification_cooldown_minutes": 5
     },
     "camera": {
         "main_resolution": [1920, 1080],

@@ -59,6 +59,14 @@ class TelegramConfig(BaseSettings):
         default=_json_config.get("telegram", {}).get("enabled", True),
         description="Enable Telegram notifications",
     )
+    notify_on_cat_detected: bool = Field(
+        default=_json_config.get("telegram", {}).get("notify_on_cat_detected", True),
+        description="Send notification when cat is detected",
+    )
+    cat_notification_cooldown_minutes: int = Field(
+        default=_json_config.get("telegram", {}).get("cat_notification_cooldown_minutes", 5),
+        description="Minimum minutes between cat detection notifications",
+    )
 
 
 class CameraConfig(BaseSettings):
