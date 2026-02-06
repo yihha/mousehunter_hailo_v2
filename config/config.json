@@ -5,7 +5,7 @@
         "chat_id": "",
         "enabled": true,
         "notify_on_cat_detected": true,
-        "cat_notification_cooldown_minutes": 5
+        "cat_notification_cooldown_minutes": 3
     },
     "camera": {
         "main_resolution": [1920, 1080],
@@ -40,8 +40,8 @@
         },
         "reg_max": 8,
         "thresholds": {
-            "cat": 0.50,
-            "rodent": 0.20
+            "cat": 0.60,
+            "rodent": 0.30
         },
         "spatial_validation": {
             "enabled": true,
