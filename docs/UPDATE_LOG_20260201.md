@@ -662,3 +662,192 @@ Hardware: Raspberry Pi 5 + Hailo-8L + PiCamera 3 NoIR
 ---
 
 *Log updated: February 5, 2026 (Session 5 - Deployment Debugging & Training Data)*
+
+---
+
+## Session 6: Annotated Evidence System + False Positive Investigation (February 6, 2026)
+
+### Major Feature: Annotated Key Frames + H.264 Video Evidence
+
+Replaced the 416-JPEG evidence dump (~120MB per event) with:
+1. **Annotated keyframe** (`keyframe_trigger.jpg`) - 640x640 JPEG with bounding boxes drawn
+2. **H.264 MP4 video** (`evidence.mp4`) - pre-roll + post-roll encoded via ffmpeg
+
+Cloud upload reduced from ~120MB to ~10MB per event.
+
+#### New Files Created
+
+**`src/mousehunter/camera/frame_annotator.py`**
+- `annotate_frame(frame, detections)` → numpy array with bounding boxes drawn
+- `annotate_frame_to_jpeg(frame, detections, quality)` → JPEG bytes
+- Color scheme: green=cat, red=rodent, yellow=unknown
+- Cached DejaVuSans-Bold font with PIL default fallback
+- Label placement: above box normally, below if near frame top
+
+**`src/mousehunter/camera/video_encoder.py`**
+- `VideoEncoder`: pipes raw RGB24 frames to ffmpeg → libx264 H.264 MP4
+  - Command: `-f rawvideo -pix_fmt rgb24 -s WxH -r FPS -i pipe:0 -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -movflags +faststart`
+  - 120s encode timeout, stderr capture for error logging
+- `EvidenceRecorder`: orchestrates pre-roll + post-roll in background daemon thread
+  - `trigger_evidence_save()` returns immediately (non-blocking)
+  - Background thread: collect post-roll → combine → encode → fire callbacks → gc.collect()
+  - Auto-fallback to legacy JPEG mode if ffmpeg unavailable
+- `FFMPEG_AVAILABLE = shutil.which("ffmpeg") is not None`
+
+#### Files Modified
+
+**`src/mousehunter/camera/circular_buffer.py`**
+- Added `get_pre_roll_frames(seconds)` method
+- Thin wrapper around existing `get_frames(since=...)`
+- Returns references (not deep copies) to keep frames alive after buffer eviction
+
+**`src/mousehunter/camera/camera_service.py`**
+- Added `post_roll_seconds` and `evidence_format` constructor parameters
+- Creates `self._evidence_recorder = EvidenceRecorder(...)` alongside existing buffer
+- `trigger_evidence_save()` routes: video→EvidenceRecorder, frames→legacy buffer
+- Added `on_evidence_complete(callback)` method
+- Updated factory function with new params
+
+**`src/mousehunter/config.py`**
+- Added to `RecordingConfig`: `post_roll_seconds: float` (default 15.0), `evidence_format: str` (default "video")
+
+**`config/config.json`**
+- Added `"post_roll_seconds": 15` and `"evidence_format": "video"` to recording section
+
+**`src/mousehunter/main.py`**
+- Camera init: passes new config, registers `_handle_evidence_complete` callback
+- `_handle_prey_confirmed()`: creates annotated frame, saves `keyframe_trigger.jpg`, defers cloud upload for video mode
+- New `_handle_evidence_complete(evidence_dir, success)`: fires when encoding done, schedules cloud upload
+- New `_schedule_cloud_upload(evidence_dir)`: extracted helper with defensive guards
+- Added `self._evidence_events: dict[str, object] = {}` for per-directory event tracking (race condition fix)
+
+**`src/mousehunter/camera/__init__.py`**
+- Added exports: `VideoEncoder`, `EvidenceRecorder`, `FFMPEG_AVAILABLE`, `annotate_frame`, `annotate_frame_to_jpeg`
+
+#### Evidence Directory Structure (New)
+
+```
+runtime/recordings/prey_20260206_143022/
+  evidence.mp4          # H.264 video (pre-roll + post-roll)
+  keyframe_trigger.jpg  # Annotated 640x640 detection frame
+  metadata.json         # Detection metadata (created by cloud_storage)
+```
+
+#### Threading Architecture
+
+```
+DetectionThread:
+  _handle_prey_confirmed()
+    → annotate_frame()                    [fast, ~10ms]
+    → camera.trigger_evidence_save()      [returns immediately]
+    → save keyframe_trigger.jpg           [fast, ~20ms]
+    → schedule _execute_lockdown()        [async on MainThread]
+
+EvidenceRecorderThread (background, daemon):
+    → collect post-roll frames for 15s
+    → pipe all frames to ffmpeg subprocess (~10-30s)
+    → call _handle_evidence_complete()
+       → schedule cloud upload on MainThread
+```
+
+#### Bugs Found and Fixed During Review
+
+| # | Issue | Fix |
+|---|-------|-----|
+| 1 | `annotate_frame_to_jpeg` crashes if PIL unavailable | Added `PIL_AVAILABLE` guard with `raise RuntimeError` |
+| 2 | Label renders off-screen at frame top | `label_y = y1 - 20 if y1 >= 20 else y2 + 2` |
+| 3 | No warning on re-trigger during active recording | Added `is_alive()` check with warning log |
+| 4 | `_schedule_cloud_upload` missing defensive guard | Added `not self._cloud_storage` to early return |
+| 5 | Race condition on `_last_prey_event` for deferred uploads | Added `self._evidence_events` dict mapping evidence_dir→event, stored at trigger time, popped at callback time |
+
+#### Git Commit
+
+```
+6041067 Add Telegram notification when cat is detected
+```
+
+Note: The evidence system changes were included in the same push.
+
+---
+
+### False Positive Investigation: Human Detected as Cat
+
+#### Observation
+The custom YOLOv8n model detected a human (person's legs in white pants) as "cat" with 60.4% confidence in the cat flap corridor.
+
+**Evidence:** `test_video/cat_only_20260206_172311.jpg` + `.json`
+- class_id=0, class_name="cat", confidence=0.604
+- bbox: bottom-right quadrant of frame (legs area)
+- detection_state: "MONITORING"
+
+#### Root Cause Analysis
+
+This is **NOT a code bug** - it's a model architecture limitation.
+
+The custom YOLOv8n model has only 2 classes: cat (0) and rodent (1). There is:
+- **No background class** / "other" / "unknown" category
+- **No way to express "this is neither cat nor rodent"**
+
+YOLOv8 uses sigmoid (not softmax) per-class scores, so classes are independent. But when the model sees something with cat-like features (warm body, leg-like shapes, similar proportions at certain angles), it has no option but to assign it to one of its two classes.
+
+#### Why Fine-Tuning Lost Human Detection
+
+When fine-tuning from COCO pretrained weights:
+1. **Backbone** (feature extraction layers): retained from COCO, still "sees" human features
+2. **Classification head**: completely replaced — 80-class output → 2-class output
+3. The new 2-class head was trained exclusively on cat/rodent images with no background examples
+4. Result: backbone activates on human-like features, head forces output to cat or rodent
+
+This is standard transfer learning behavior, not a bug.
+
+#### Recommended Solutions
+
+**Quick fix (no retraining):**
+- Raise `thresholds.cat` from 0.50 to **0.65-0.70** to reject low-confidence cat detections
+- The false positive was only 60.4% — a higher threshold eliminates it
+
+**Medium-term (model improvement):**
+- Add **background/negative images** to the training set (YOLO supports this natively with label-free images)
+- Collect hard negatives using the existing training data capture system (cat_only mode already captures these cases)
+- Include 10-20% background images: empty corridor, human legs, other non-target objects
+
+**Long-term (architecture):**
+- Add a 3rd class ("background" or "other") if background images alone aren't sufficient
+- This is generally not needed — YOLO handles background images well without an explicit class
+
+#### Key Insight: YOLO Background Training
+YOLO natively supports background images: if an image has no `.txt` label file (or an empty one), the model treats all predictions on that image as false positives during training. This teaches the model "not everything is a detection." No code changes needed — just add unlabeled images to the training dataset.
+
+---
+
+### Current System Configuration (v3.0.0)
+
+```
+MouseHunter v3.0.0
+Model: YOLOv8n custom (2 classes: cat=0, rodent=1)
+reg_max: 8
+Thresholds: cat=0.50, rodent=0.20
+  ⚠ Consider raising cat threshold to 0.65-0.70 to reduce human false positives
+Confirmation: score_accumulation (3.0s window, 0.9 threshold)
+Spatial validation: enabled (0.25 box expansion)
+Evidence: H.264 video + annotated keyframe (NEW)
+  - post_roll_seconds: 15
+  - evidence_format: "video" (fallback: "frames")
+Training data capture: available (disabled by default)
+Cloud storage: rclone-based (optional)
+Hardware: Raspberry Pi 5 + Hailo-8L + PiCamera 3 NoIR
+```
+
+---
+
+### Action Items
+
+- [ ] Raise cat confidence threshold to 0.65-0.70 (quick false positive fix)
+- [ ] Collect background/negative images via training data capture system
+- [ ] Include hard negatives (human, empty corridor) in next training round
+- [ ] Verify H.264 evidence recording works on Pi (ffmpeg installed)
+- [ ] Monitor cloud upload sizes with new video evidence format
+
+---
+
+*Log updated: February 6, 2026 (Session 6 - Annotated Evidence System + False Positive Investigation)*
