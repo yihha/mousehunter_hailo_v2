@@ -75,6 +75,7 @@ class MouseHunterController:
         self._detection_count = 0
         self._lockdown_count = 0
         self._last_prey_event = None  # Most recent prey detection event
+        self._evidence_events: dict[str, object] = {}  # evidence_dir -> event for deferred upload
         self._last_cat_notification_time: float = 0  # For cat detection cooldown
 
         # Callbacks
@@ -260,7 +261,11 @@ class MouseHunterController:
                 vflip=camera_config.vflip,
                 hflip=camera_config.hflip,
                 output_dir=recording_config.output_dir,
+                post_roll_seconds=recording_config.post_roll_seconds,
+                evidence_format=recording_config.evidence_format,
             )
+            # Register evidence completion callback for deferred cloud upload
+            self._camera.on_evidence_complete(self._handle_evidence_complete)
             logger.info("Camera service initialized")
         except Exception as e:
             logger.error(f"Failed to initialize camera: {e}")
@@ -450,30 +455,59 @@ class MouseHunterController:
         self._detection_count += 1
         self._last_prey_event = event  # Store for Telegram notification
 
-        # Capture evidence image
+        # Create annotated evidence image with bounding boxes
         image_bytes = None
         if event.frame is not None:
             try:
-                from PIL import Image
-                from io import BytesIO
+                from mousehunter.camera.frame_annotator import annotate_frame_to_jpeg
 
-                img = Image.fromarray(event.frame)
-                buffer = BytesIO()
-                img.save(buffer, "JPEG", quality=85)
-                image_bytes = buffer.getvalue()
+                detections_to_draw = [
+                    d for d in [event.cat_detection, event.prey_detection] if d is not None
+                ]
+                image_bytes = annotate_frame_to_jpeg(event.frame, detections_to_draw)
             except Exception as e:
-                logger.error(f"Failed to encode evidence image: {e}")
+                logger.error(f"Failed to create annotated evidence image: {e}")
+                # Fallback: raw unannotated JPEG
+                try:
+                    from PIL import Image
+                    from io import BytesIO
 
-        # Save evidence to disk
+                    img = Image.fromarray(event.frame)
+                    buf = BytesIO()
+                    img.save(buf, "JPEG", quality=85)
+                    image_bytes = buf.getvalue()
+                except Exception as e2:
+                    logger.error(f"Fallback evidence image also failed: {e2}")
+
+        # Save evidence to disk (video mode: returns immediately, encodes in background)
         evidence_path = None
         if self._camera:
             try:
                 evidence_path = self._camera.trigger_evidence_save(
                     f"prey_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
                 )
-                logger.info(f"Evidence saved to: {evidence_path}")
+                logger.info(f"Evidence triggered: {evidence_path}")
+
+                # Store event for deferred cloud upload (avoids race on _last_prey_event)
+                if evidence_path:
+                    self._evidence_events[str(evidence_path)] = event
+
+                # Save annotated key frame to evidence directory
+                if evidence_path and image_bytes:
+                    try:
+                        keyframe_path = evidence_path / "keyframe_trigger.jpg"
+                        keyframe_path.write_bytes(image_bytes)
+                        logger.info(f"Key frame saved: {keyframe_path}")
+                    except Exception as e:
+                        logger.error(f"Failed to save key frame: {e}")
             except Exception as e:
-                logger.error(f"Failed to save evidence: {e}")
+                logger.error(f"Failed to trigger evidence save: {e}")
+
+        # For legacy "frames" mode, upload immediately (frames saved synchronously)
+        # For "video" mode, upload is deferred to _handle_evidence_complete callback
+        if self._camera and self._camera.evidence_format != "video":
+            if self._cloud_storage and evidence_path:
+                self._schedule_cloud_upload(evidence_path, event)
 
         # Schedule async actions on main loop
         # Wait for main loop to be ready (with timeout to avoid deadlock)
@@ -482,20 +516,6 @@ class MouseHunterController:
             return
 
         if self._main_loop:
-            # Schedule cloud upload (async, non-blocking)
-            if self._cloud_storage and evidence_path:
-                try:
-                    asyncio.run_coroutine_threadsafe(
-                        self._cloud_storage.upload_evidence(
-                            evidence_path,
-                            prey_type=event.prey_detection.class_name,
-                            confidence=event.prey_detection.confidence,
-                            cat_confidence=event.cat_detection.confidence,
-                        ),
-                        self._main_loop,
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to schedule cloud upload: {e}")
             try:
                 future = asyncio.run_coroutine_threadsafe(
                     self._execute_lockdown(image_bytes), self._main_loop
@@ -504,6 +524,42 @@ class MouseHunterController:
                 future.add_done_callback(self._lockdown_callback)
             except Exception as e:
                 logger.error(f"Failed to schedule lockdown: {e}", exc_info=True)
+
+    def _handle_evidence_complete(self, evidence_dir, success: bool) -> None:
+        """
+        Handle evidence encoding completion (called from EvidenceRecorder thread).
+
+        Schedules cloud upload when video evidence is ready.
+        """
+        # Retrieve the event that triggered this recording (avoids race with _last_prey_event)
+        event = self._evidence_events.pop(str(evidence_dir), self._last_prey_event)
+
+        if not success:
+            logger.warning(f"Evidence encoding failed for {evidence_dir}")
+            return
+
+        logger.info(f"Evidence encoding complete: {evidence_dir}")
+
+        if self._cloud_storage and evidence_dir:
+            self._schedule_cloud_upload(evidence_dir, event)
+
+    def _schedule_cloud_upload(self, evidence_path, event) -> None:
+        """Schedule cloud upload on the main event loop."""
+        if not self._main_loop or not self._cloud_storage:
+            return
+
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._cloud_storage.upload_evidence(
+                    evidence_path,
+                    prey_type=event.prey_detection.class_name if event else "unknown",
+                    confidence=event.prey_detection.confidence if event else 0.0,
+                    cat_confidence=event.cat_detection.confidence if event else 0.0,
+                ),
+                self._main_loop,
+            )
+        except Exception as e:
+            logger.error(f"Failed to schedule cloud upload: {e}")
 
     def _lockdown_callback(self, future) -> None:
         """Callback to log lockdown execution errors."""

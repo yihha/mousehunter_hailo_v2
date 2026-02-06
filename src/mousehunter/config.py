@@ -361,6 +361,14 @@ class RecordingConfig(BaseSettings):
         default=_json_config.get("recording", {}).get("max_age_days", 7),
         description="Maximum age of recordings before cleanup",
     )
+    post_roll_seconds: float = Field(
+        default=_json_config.get("recording", {}).get("post_roll_seconds", 15.0),
+        description="Seconds of post-event footage to capture for evidence",
+    )
+    evidence_format: str = Field(
+        default=_json_config.get("recording", {}).get("evidence_format", "video"),
+        description="Evidence format: 'video' for H.264 MP4, 'frames' for legacy JPEGs",
+    )
 
 
 class TrainingDataConfig(BaseSettings):

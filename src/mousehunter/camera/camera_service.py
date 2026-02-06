@@ -19,6 +19,7 @@ from typing import Callable
 import numpy as np
 
 from .circular_buffer import CircularVideoBuffer
+from .video_encoder import EvidenceRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +100,8 @@ class CameraService:
         vflip: bool = False,
         hflip: bool = False,
         output_dir: str | Path = "runtime/recordings",
+        post_roll_seconds: float = 15.0,
+        evidence_format: str = "video",
     ):
         """
         Initialize the camera service.
@@ -111,12 +114,15 @@ class CameraService:
             vflip: Vertical flip
             hflip: Horizontal flip
             output_dir: Directory for saved recordings
+            post_roll_seconds: Seconds of post-event footage for evidence
+            evidence_format: "video" for H.264 MP4, "frames" for legacy JPEGs
         """
         self.main_resolution = main_resolution
         self.inference_resolution = inference_resolution
         self.framerate = framerate
         self.vflip = vflip
         self.hflip = hflip
+        self.evidence_format = evidence_format
 
         # State
         self._started = False
@@ -136,6 +142,14 @@ class CameraService:
             output_dir=output_dir,
         )
 
+        # Evidence recorder for video encoding
+        self._evidence_recorder = EvidenceRecorder(
+            framerate=framerate,
+            post_roll_seconds=post_roll_seconds,
+            output_dir=output_dir,
+            evidence_format=evidence_format,
+        )
+
         # Frame callbacks (for inference engine)
         self._frame_callbacks: list[Callable[[np.ndarray, datetime], None]] = []
 
@@ -149,7 +163,8 @@ class CameraService:
 
         logger.info(
             f"CameraService initialized: main={main_resolution}, "
-            f"inference={inference_resolution}, fps={framerate}"
+            f"inference={inference_resolution}, fps={framerate}, "
+            f"evidence={evidence_format}"
         )
 
     def _configure_camera(self) -> None:
@@ -332,15 +347,35 @@ class CameraService:
 
     def trigger_evidence_save(self, event_name: str = "detection") -> Path | None:
         """
-        Trigger saving of the circular buffer.
+        Trigger saving evidence (video or legacy frames).
+
+        In video mode: captures pre-roll from buffer, spawns background
+        thread for post-roll + H.264 encoding. Returns immediately.
+
+        In frames mode: delegates to existing buffer.trigger_save() (synchronous).
 
         Args:
             event_name: Name for the event folder
 
         Returns:
-            Path to saved evidence directory
+            Path to evidence directory
         """
-        return self.buffer.trigger_save(event_name)
+        if self.evidence_format == "video":
+            pre_frames = self.buffer.get_pre_roll_frames()
+            return self._evidence_recorder.trigger_evidence_save(
+                event_name, pre_frames, self.get_main_frame
+            )
+        else:
+            return self.buffer.trigger_save(event_name)
+
+    def on_evidence_complete(self, callback) -> None:
+        """
+        Register callback for when video evidence encoding completes.
+
+        Args:
+            callback: Function(evidence_dir: Path, success: bool)
+        """
+        self._evidence_recorder.on_complete(callback)
 
     def on_frame(self, callback: Callable[[np.ndarray, datetime], None]) -> None:
         """
@@ -399,6 +434,8 @@ def _create_default_camera() -> CameraService:
             vflip=camera_config.vflip,
             hflip=camera_config.hflip,
             output_dir=recording_config.output_dir,
+            post_roll_seconds=recording_config.post_roll_seconds,
+            evidence_format=recording_config.evidence_format,
         )
     except ImportError:
         logger.warning("Config not available, using defaults")

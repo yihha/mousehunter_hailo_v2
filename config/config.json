@@ -84,7 +84,9 @@
     "recording": {
         "output_dir": "runtime/recordings",
         "evidence_dir": "runtime/evidence",
-        "max_age_days": 7
+        "max_age_days": 7,
+        "post_roll_seconds": 15,
+        "evidence_format": "video"
     },
     "cloud_storage": {
         "enabled": false,

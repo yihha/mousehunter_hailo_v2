@@ -158,6 +158,25 @@ class CircularVideoBuffer:
 
         return frames
 
+    def get_pre_roll_frames(self, seconds: float | None = None) -> list[BufferedFrame]:
+        """
+        Get frames for pre-roll evidence capture.
+
+        Returns references to BufferedFrame objects (no deep copy).
+        These references keep the frames alive even after the buffer
+        evicts them during post-roll capture.
+
+        Args:
+            seconds: Seconds of pre-roll to include (default: full buffer)
+
+        Returns:
+            List of BufferedFrame references
+        """
+        if seconds is not None:
+            since = datetime.now() - timedelta(seconds=seconds)
+            return self.get_frames(since=since)
+        return self.get_frames()
+
     def get_latest_frame(self) -> BufferedFrame | None:
         """Get the most recent frame."""
         with self._lock:
