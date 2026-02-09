@@ -2,24 +2,31 @@
 """
 Evidence Pipeline Integration Test — Run on Raspberry Pi
 
-Tests the full CircularOutput2 + H264Encoder + FfmpegOutput evidence pipeline
+Tests the full CircularOutput2 + H264Encoder + PyavOutput evidence pipeline
 that was introduced in Session 7 to replace the raw-frame deque (2.7GB -> 19MB).
+
+KEY INSIGHT: CircularOutput2._flush() uses a **delayed-write** design —
+frames are only written to the output when they are older than
+buffer_duration_ms.  close_output() does NOT flush the buffer.
+To flush ALL frames, we call stop() (which passes timestamp_now=None
+to _flush, bypassing the age check), then start() to resume buffering.
 
 Tests:
   1. Camera starts with hardware H.264 encoder + CircularOutput2
   2. Lores snapshot capture (RGB888 640x640)
-  3. Evidence MP4 save (pre-roll + post-roll via open_output/close_output)
-  4. MP4 file validity (non-zero, playable header check)
-  5. Thread safety (open_output from main, close_output from timer thread)
+  3. Evidence MP4 save (pre-roll + post-roll via open_output / stop / start)
+  4. MP4 file validity (non-zero, valid header, ffprobe check)
+  5. Thread safety (open_output from main, stop/start from timer thread)
   6. Evidence serialization guard (reject parallel saves)
   7. Completion callback fires
   8. Memory stays flat during evidence save
-  9. sdnotify importable
+  9. CameraService integration (the actual class used in production)
+ 10. sdnotify importable
 
 Usage:
   python scripts/test_evidence_pipeline.py
 
-Requires: Pi hardware with PiCamera 3, picamera2, ffmpeg (or pyav)
+Requires: Pi hardware with PiCamera 3, picamera2, pyav
 """
 
 import gc
@@ -87,8 +94,6 @@ def is_valid_mp4(path: Path) -> tuple[bool, str]:
         return False, f"file too small ({size} bytes)"
     with open(path, "rb") as f:
         header = f.read(12)
-    # MP4 starts with a box: [size:4][type:4]
-    # Common first boxes: ftyp, moov, mdat, free
     if len(header) < 8:
         return False, "could not read header"
     box_type = header[4:8]
@@ -124,7 +129,8 @@ def probe_mp4_with_ffprobe(path: Path) -> tuple[bool, str]:
 def main():
     print("=" * 65)
     print("  MouseHunter Evidence Pipeline Test")
-    print("  Validates CircularOutput2 + H264Encoder + FfmpegOutput")
+    print("  Validates CircularOutput2 + H264Encoder + PyavOutput")
+    print("  (uses stop()/start() flush — NOT close_output())")
     print("=" * 65)
     print()
 
@@ -168,20 +174,23 @@ def main():
         _print_summary()
         return
 
-    # FileOutput (for raw H.264 capture)
+    # PyavOutput (for direct MP4 writing — official recommended approach)
     try:
-        from picamera2.outputs import FileOutput
-        record("FileOutput import", True)
+        from picamera2.outputs import PyavOutput
+        record("PyavOutput import", True)
     except ImportError:
-        record("FileOutput import", False, "upgrade picamera2")
-        print("\nCannot proceed without FileOutput. Exiting.")
+        record("PyavOutput import", False, "pip install av (pyav)")
+        print("\nCannot proceed without PyavOutput. Exiting.")
         _print_summary()
         return
 
-    # ffmpeg (for H.264 → MP4 remux)
+    # ffprobe (optional — for validation only, not required for evidence saving)
     import shutil
-    ffmpeg_path = shutil.which("ffmpeg")
-    record("ffmpeg available", ffmpeg_path is not None, ffmpeg_path or "not found in PATH")
+    ffprobe_path = shutil.which("ffprobe")
+    if ffprobe_path:
+        record("ffprobe available", True, ffprobe_path)
+    else:
+        record_skip("ffprobe available", "not in PATH (optional, validation only)")
 
     # PIL
     try:
@@ -213,7 +222,7 @@ def main():
             return
 
         encoder = H264Encoder(bitrate=5_000_000, repeat=True)
-        circular = CircularOutput2(buffer_duration_ms=10000)  # 10s for test
+        circular = CircularOutput2(buffer_duration_ms=5000)  # 5s buffer
 
         try:
             picam2.start_recording(encoder, circular)
@@ -224,9 +233,9 @@ def main():
             _print_summary()
             return
 
-        # Let buffer fill for a few seconds
-        print("  ... filling circular buffer (5s) ...")
-        time.sleep(5)
+        # Let buffer fill past buffer_duration_ms to ensure it's full
+        print("  ... filling circular buffer (7s, buffer=5s) ...")
+        time.sleep(7)
 
         # ── Test 2: Lores snapshot ───────────────────────────────────
         print()
@@ -263,9 +272,7 @@ def main():
         try:
             main_frame = picam2.capture_array("main")
             main_shape = main_frame.shape
-            # YUV420 returns 2D array: (height * 3 // 2, width) — NOT 3-channel RGB
             is_2d = len(main_shape) == 2
-            expected_h = 1080 * 3 // 2  # 1620
             record(
                 "capture_array('main') is YUV420 (2D)",
                 is_2d,
@@ -276,23 +283,21 @@ def main():
 
         # ── Test 3: Evidence MP4 save ────────────────────────────────
         print()
-        print("--- Test 3: Evidence MP4 Save (pre-roll + post-roll) ---")
+        print("--- Test 3: Evidence MP4 Save (PyavOutput + stop/start flush) ---")
 
         mem_before = get_rss_mb()
         evidence_dir = output_dir / "prey_test_001"
         evidence_dir.mkdir(parents=True, exist_ok=True)
-        h264_path = evidence_dir / "evidence.h264"
         mp4_path = evidence_dir / "evidence.mp4"
 
         completion_event = threading.Event()
         completion_result: dict = {}
 
-        post_roll_seconds = 5  # short for testing
+        post_roll_seconds = 3  # short for testing
 
         try:
-            # Open FileOutput — writes raw H.264 to disk (always works)
-            circular.open_output(FileOutput(str(h264_path)))
-            record("circular.open_output(FileOutput(...))", True)
+            circular.open_output(PyavOutput(str(mp4_path)))
+            record("circular.open_output(PyavOutput(...))", True)
         except Exception as e:
             record("circular.open_output", False, str(e))
             picam2.stop_recording()
@@ -300,16 +305,25 @@ def main():
             _print_summary()
             return
 
-        # Simulate post-roll in background thread (mirrors camera_service.py)
+        # Background thread: wait post-roll, then stop()+start() to flush
         def post_roll_thread():
             try:
                 time.sleep(post_roll_seconds)
-                circular.close_output()
+                # stop() calls _flush(None, output) which bypasses the
+                # timestamp age-check and writes ALL buffered frames
+                circular.stop()
+                # Restart buffering immediately
+                circular.start()
                 completion_result["success"] = True
                 completion_result["thread"] = threading.current_thread().name
             except Exception as e:
                 completion_result["success"] = False
                 completion_result["error"] = str(e)
+                # Try to restart circular output
+                try:
+                    circular.start()
+                except Exception:
+                    pass
             finally:
                 completion_event.set()
 
@@ -324,41 +338,24 @@ def main():
         completed = completion_event.wait(timeout=post_roll_seconds + 10)
 
         record(
-            "post-roll thread completed",
+            "post-roll stop()/start() completed",
             completed and completion_result.get("success", False),
             f"thread={completion_result.get('thread', '?')}"
             + (f", error={completion_result.get('error')}" if not completion_result.get("success") else ""),
         )
 
-        # ── Test 4: H.264 file + ffmpeg remux to MP4 ─────────────────
+        # ── Test 4: MP4 Validation ───────────────────────────────────
         print()
-        print("--- Test 4: H.264 File + ffmpeg Remux ---")
+        print("--- Test 4: MP4 File Validation ---")
 
-        h264_exists = h264_path.exists() and h264_path.stat().st_size > 0
+        mp4_exists = mp4_path.exists() and mp4_path.stat().st_size > 0
         record(
-            "H.264 file created",
-            h264_exists,
-            f"{h264_path.stat().st_size / 1024:.1f} KB" if h264_exists else "file missing or empty",
+            "MP4 file created",
+            mp4_exists,
+            f"{mp4_path.stat().st_size / 1024:.1f} KB" if mp4_exists else "file missing or empty",
         )
 
-        if h264_exists and ffmpeg_path:
-            try:
-                result = subprocess.run(
-                    ["ffmpeg", "-y", "-f", "h264", "-i", str(h264_path),
-                     "-c:v", "copy", "-movflags", "+faststart", str(mp4_path)],
-                    capture_output=True, timeout=30,
-                )
-                remux_ok = result.returncode == 0 and mp4_path.exists()
-                record(
-                    "ffmpeg remux H.264 → MP4",
-                    remux_ok,
-                    f"{mp4_path.stat().st_size / 1024:.1f} KB" if remux_ok
-                    else result.stderr.decode(errors="replace")[:200],
-                )
-            except Exception as e:
-                record("ffmpeg remux", False, str(e))
-
-        if mp4_path.exists():
+        if mp4_exists:
             valid, detail = is_valid_mp4(mp4_path)
             record("MP4 header check", valid, detail)
 
@@ -368,44 +365,54 @@ def main():
             else:
                 record("ffprobe validation", probe_ok, probe_detail)
 
-        # ── Test 5: Thread safety (close from different thread) ──────
+        # ── Test 5: Thread safety (stop/start from different thread) ─
         print()
         print("--- Test 5: Thread Safety ---")
         record(
-            "open_output (main) / close_output (bg thread)",
+            "open_output (main) / stop+start (bg thread)",
             completed and completion_result.get("success", False),
-            "cross-thread open/close succeeded" if completion_result.get("success") else "FAILED",
+            "cross-thread open/stop/start succeeded" if completion_result.get("success") else "FAILED",
         )
 
         # ── Test 6: Evidence serialization guard ─────────────────────
         print()
         print("--- Test 6: Evidence Serialization Guard ---")
 
-        # Start a new evidence save
-        h264_path_2 = evidence_dir / "evidence_2.h264"
+        # Start a new evidence save (buffer should be recording again after start())
+        mp4_path_2 = evidence_dir / "evidence_2.mp4"
         try:
-            circular.open_output(FileOutput(str(h264_path_2)))
-            # Try to open a SECOND output while first is active — should fail or be rejected
-            h264_path_3 = evidence_dir / "evidence_3.h264"
+            circular.open_output(PyavOutput(str(mp4_path_2)))
+            # Try to open a SECOND output while first is active — should raise
+            mp4_path_3 = evidence_dir / "evidence_3.mp4"
             second_rejected = False
             try:
-                circular.open_output(FileOutput(str(h264_path_3)))
-                # If it didn't raise, close it
-                circular.close_output()
-                # CircularOutput2 might silently close previous — check if documented
+                circular.open_output(PyavOutput(str(mp4_path_3)))
+                # If it didn't raise, clean up
+                circular.stop()
+                circular.start()
                 record(
                     "parallel open_output rejected",
                     False,
-                    "second open_output did NOT raise (may close previous implicitly)",
+                    "second open_output did NOT raise RuntimeError",
                 )
+            except RuntimeError:
+                second_rejected = True
+                record("parallel open_output rejected", True, "correctly raised RuntimeError")
             except Exception as e:
                 second_rejected = True
-                record("parallel open_output rejected", True, f"correctly raised: {type(e).__name__}")
+                record("parallel open_output rejected", True, f"raised: {type(e).__name__}: {e}")
             finally:
                 if not second_rejected:
-                    # Clean up first recording
                     try:
-                        circular.close_output()
+                        circular.stop()
+                        circular.start()
+                    except Exception:
+                        pass
+                else:
+                    # Close the first (still-open) output
+                    try:
+                        circular.stop()
+                        circular.start()
                     except Exception:
                         pass
         except Exception as e:
@@ -450,9 +457,9 @@ def main():
                 main_resolution=(1920, 1080),
                 inference_resolution=(640, 640),
                 framerate=30,
-                buffer_seconds=10.0,
+                buffer_seconds=5.0,
                 output_dir=str(svc_dir),
-                post_roll_seconds=5.0,
+                post_roll_seconds=3.0,
                 evidence_format="video",
             )
 
@@ -470,9 +477,9 @@ def main():
             svc.start()
             record("CameraService.start()", True, f"hw_encoder={svc._h264_encoder is not None}")
 
-            # Let buffer fill
-            print("  ... filling buffer (5s) ...")
-            time.sleep(5)
+            # Let buffer fill past buffer_duration
+            print("  ... filling buffer (7s, buffer=5s) ...")
+            time.sleep(7)
 
             # Snapshot test
             snap_bytes = svc.capture_snapshot_bytes()
@@ -490,9 +497,9 @@ def main():
                 str(edir) if edir else "None",
             )
 
-            # Wait for completion callback
-            print("  ... waiting for evidence completion (~10s) ...")
-            cb_fired = cb_event.wait(timeout=20)
+            # Wait for completion callback (post_roll=3s + margin)
+            print("  ... waiting for evidence completion (~8s) ...")
+            cb_fired = cb_event.wait(timeout=15)
             record(
                 "on_evidence_complete callback",
                 cb_fired and cb_results.get("success", False),
