@@ -851,3 +851,147 @@ Hardware: Raspberry Pi 5 + Hailo-8L + PiCamera 3 NoIR
 ---
 
 *Log updated: February 6, 2026 (Session 6 - Annotated Evidence System + False Positive Investigation)*
+
+---
+
+## Session 7: System Freeze Fix — 6 Stability Fixes (February 8, 2026)
+
+### The Incident
+
+On Feb 8, 2026, the MouseHunter system (Pi 5, 8GB RAM) completely froze after a prey detection event, requiring a hard reboot. The system was running Firefox alongside MouseHunter when a prey detection triggered the full evidence pipeline.
+
+### Root Cause Analysis (from journal logs)
+
+Six contributing factors identified:
+
+| # | Factor | Impact |
+|---|--------|--------|
+| 1 | **Memory exhaustion** | CircularVideoBuffer held 450 raw frames (2.7 GB). Evidence recording copied 712 frames (4.3 GB). Combined ~7 GB just for video, on top of OS + Firefox + Hailo. |
+| 2 | **SD card swap thrashing** | 511 MB swap on SD caused a death spiral instead of clean OOM kill |
+| 3 | **Event loop starvation** | 2.5 min Telegram polling gap, jammer 93s late on 300s timer, state tick 102s late |
+| 4 | **rclone thread pool exhaustion** | Two 300s upload timeouts blocked default executor threads |
+| 5 | **Audio blocking** | `audio.play()` called synchronously in async `_execute_lockdown()`, ALSA device probing blocked |
+| 6 | **No LOCKDOWN timeout failsafe** | State machine relied solely on jammer `is_active` check |
+
+### Fixes Applied
+
+#### Fix 1: Replace Raw Frame Buffer with CircularOutput2 (camera_service.py) — LARGEST CHANGE
+
+**Before**: Background thread captures both main (1920x1080 RGB, 6 MB/frame) and lores streams. Main frames copied into Python deque (2.7 GB). Evidence recorder copies 712 frames (4.3 GB) + pipes to ffmpeg.
+
+**After**: Hardware H.264 encoder encodes main stream on the ISP. `CircularOutput2` stores ~19 MB of compressed H.264 in a time-based ring buffer. Evidence saved via `open_output(PyavOutput("evidence.mp4"))` → background thread sleeps for post-roll → `close_output()`.
+
+Key changes:
+- Main stream format: `RGB888` → `YUV420` (required for hardware H.264 encoder)
+- Removed `CircularVideoBuffer` dependency from camera_service (legacy file kept for fallback)
+- Removed `EvidenceRecorder` dependency from camera_service (legacy file kept for fallback)
+- Capture loop now only captures lores stream for inference (no main frame copies)
+- Snapshots (`capture_snapshot_bytes`, `get_main_frame`, `save_snapshot`) use on-demand `capture_array("main")`
+- Evidence serialization guard: `self._evidence_recording` flag prevents parallel saves
+- `on_evidence_complete` callbacks now owned directly by CameraService
+
+**Memory impact**: ~7 GB → ~19 MB for the entire video pipeline.
+
+**picamera2 API used**:
+```python
+from picamera2.encoders import H264Encoder
+from picamera2.outputs import CircularOutput2, PyavOutput
+
+encoder = H264Encoder(bitrate=5_000_000, repeat=True)
+circular = CircularOutput2(buffer_duration_ms=15000)
+picam2.start_recording(encoder, circular)
+
+# On trigger:
+circular.open_output(PyavOutput("evidence.mp4"))  # flushes pre-roll
+time.sleep(post_roll_seconds)                      # in background thread
+circular.close_output()                             # finalizes MP4
+```
+
+#### Fix 2: Systemd Watchdog + Memory Limits (mousehunter.service, main.py)
+
+**Service file changes**:
+- `Type=simple` → `Type=notify` (enables sd-notify protocol)
+- Added `WatchdogSec=30` (systemd kills if no heartbeat in 30s)
+- Added `MemoryMax=6G` (hard cgroup limit — SIGKILL if exceeded, leaves 2 GB for OS)
+- Added `MemoryHigh=5G` (soft limit — triggers memory pressure, slows allocation)
+
+**main.py changes**:
+- Import `sdnotify` (pure-python) with `systemd.daemon` fallback
+- Send `READY=1` after all initialization complete
+- Send `WATCHDOG=1` heartbeat every ~1s in main loop (after each `_state_machine_tick()`)
+
+**New dependency**: `pip install sdnotify`
+
+#### Fix 3: rclone Upload Hardening (cloud_storage.py)
+
+- Added dedicated `ThreadPoolExecutor(max_workers=2, thread_name_prefix="rclone")` — isolates rclone from the default asyncio executor
+- Reduced default timeout from 300s to 120s
+- Added `_upload_in_progress` guard: skips new uploads if one is already running (prevents stacking)
+
+#### Fix 4: LOCKDOWN Timeout Failsafe (main.py)
+
+Added hard timeout in `_state_machine_tick()`:
+- Computes `elapsed` since `_lockdown_start`
+- If `elapsed >= lockdown_duration_seconds * 2` (default: 600s), force-deactivates jammer and transitions to COOLDOWN
+- Prevents infinite LOCKDOWN if jammer check is delayed or jammer auto-off fails
+
+#### Fix 5: Audio Non-Blocking (main.py)
+
+Wrapped `self._audio.play()` in `run_in_executor` with `asyncio.wait_for(timeout=5.0)`:
+- Prevents ALSA device probing from blocking the event loop
+- Catches `TimeoutError` and `Exception` gracefully
+- Feb 8 logs showed "ALSA: Couldn't open audio device: Unknown error 524"
+
+#### Fix 6: Serialize Evidence Recordings (video_encoder.py)
+
+Changed parallel recording behavior to rejection:
+- **Before**: "starting new recording in parallel" (warning, then proceed)
+- **After**: "SKIPPING new recording" (warning, return early with directory path)
+- Keyframe is still saved by main.py before `trigger_evidence_save` is called
+- Defense-in-depth: with Fix 1, evidence recording no longer accumulates raw frames
+
+### Known Issue to Verify on Pi
+
+**`capture_array("main")` with YUV420 stream**: When the main stream is configured as YUV420, `capture_array("main")` may return YUV420 data instead of RGB. If so, `Image.fromarray()` in `capture_snapshot_bytes()` and `save_snapshot()` would produce garbled images.
+
+**Potential fix**: Use `capture_array("lores")` (which is RGB888 at 640x640) for snapshot functions. This is adequate for Telegram notifications and API endpoints. Needs testing on Pi to confirm behavior.
+
+**Alternatively**: picamera2 may auto-convert to RGB when `capture_array()` is called. Needs verification.
+
+### Files Modified
+
+| File | Change Type | Description |
+|------|------------|-------------|
+| `src/mousehunter/camera/camera_service.py` | **Rewritten** | CircularOutput2 + hw H.264 encoder, lores-only capture loop |
+| `src/mousehunter/main.py` | Modified | sd-notify watchdog, LOCKDOWN failsafe, audio non-blocking |
+| `src/mousehunter/storage/cloud_storage.py` | Modified | Dedicated executor, reduced timeout, upload guard |
+| `src/mousehunter/camera/video_encoder.py` | Modified | Reject parallel recordings |
+| `systemd/mousehunter.service` | Modified | Type=notify, WatchdogSec, MemoryMax/MemoryHigh |
+| `src/mousehunter/camera/__init__.py` | Modified | Updated docstring |
+
+### Remaining TODO
+
+- [ ] **Verify `capture_array("main")` format on Pi** — does it return RGB or YUV420 when main stream is YUV420?
+- [ ] If YUV420: change `capture_snapshot_bytes()` and `save_snapshot()` to use lores stream
+- [ ] **Install sdnotify**: `pip install sdnotify` in the venv on Pi
+- [ ] **Test evidence MP4 on Pi**: verify CircularOutput2 → PyavOutput produces valid MP4
+- [ ] **Test /photo command**: verify Telegram snapshot still works with new capture method
+- [ ] **Monitor memory**: `htop` during prey detection — should stay flat at ~1-2 GB
+- [ ] **Test systemd watchdog**: `sudo journalctl -u mousehunter | grep WATCHDOG`
+- [ ] **Overnight stability test**: run 12+ hours with Firefox closed
+
+### Deployment Steps
+
+```bash
+# On Pi
+cd ~/mousehunter_hailo_v2
+git pull
+pip install sdnotify  # new dependency
+sudo systemctl daemon-reload  # reload service file changes
+sudo systemctl restart mousehunter
+sudo journalctl -u mousehunter -f  # watch logs
+```
+
+---
+
+*Log updated: February 8, 2026 (Session 7 - System Freeze Fix)*

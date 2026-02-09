@@ -41,7 +41,7 @@
         "reg_max": 8,
         "thresholds": {
             "cat": 0.60,
-            "rodent": 0.30
+            "rodent": 0.35
         },
         "spatial_validation": {
             "enabled": true,
@@ -89,8 +89,8 @@
         "evidence_format": "video"
     },
     "cloud_storage": {
-        "enabled": false,
-        "rclone_remote": "",
+        "enabled": true,
+        "rclone_remote": "gdrive",
         "remote_path": "MouseHunter",
         "upload_after_detection": true,
         "sync_interval_minutes": 60,
@@ -101,7 +101,7 @@
     },
     "training_data": {
         "_comment": "Capture images for YOLO model training/improvement",
-        "enabled": false,
+        "enabled": true,
         "periodic_interval_minutes": 30,
         "capture_cat_only": true,
         "cat_only_delay_seconds": 2.0,

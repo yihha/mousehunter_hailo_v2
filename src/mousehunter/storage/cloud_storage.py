@@ -15,6 +15,7 @@ import json
 import logging
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -74,6 +75,12 @@ class CloudStorage:
         self._upload_status: dict[str, dict[str, Any]] = {}
         self._load_tracker()
 
+        # Dedicated thread pool for rclone (isolates from default asyncio executor)
+        self._upload_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="rclone")
+
+        # Upload guard to prevent stacking
+        self._upload_in_progress = False
+
         # Sync lock to prevent concurrent syncs
         self._sync_lock = asyncio.Lock()
 
@@ -109,7 +116,7 @@ class CloudStorage:
         except Exception as e:
             logger.error(f"Failed to save upload tracker: {e}")
 
-    def _run_rclone(self, args: list[str], timeout: int = 300) -> tuple[bool, str]:
+    def _run_rclone(self, args: list[str], timeout: int = 120) -> tuple[bool, str]:
         """
         Run an rclone command.
 
@@ -262,6 +269,11 @@ class CloudStorage:
                 logger.debug(f"Already uploaded: {folder_name}")
                 return True
 
+        # Upload guard: skip if another upload is in progress
+        if self._upload_in_progress:
+            logger.warning(f"Upload already in progress, deferring: {folder_name}")
+            return False
+
         # Create metadata file
         self.create_metadata(
             evidence_path,
@@ -273,18 +285,22 @@ class CloudStorage:
         # Generate remote path
         remote_path = self._get_remote_path(evidence_path)
 
-        # Upload using rclone copy
+        # Upload using rclone copy (dedicated executor, reduced timeout)
         logger.info(f"Uploading evidence: {folder_name} -> {remote_path}")
 
-        success, output = await asyncio.get_running_loop().run_in_executor(
-            None,
-            lambda: self._run_rclone([
-                "copy",
-                str(evidence_path),
-                remote_path,
-                "--progress",
-            ])
-        )
+        self._upload_in_progress = True
+        try:
+            success, output = await asyncio.get_running_loop().run_in_executor(
+                self._upload_executor,
+                lambda: self._run_rclone([
+                    "copy",
+                    str(evidence_path),
+                    remote_path,
+                    "--progress",
+                ])
+            )
+        finally:
+            self._upload_in_progress = False
 
         # Update tracker
         self._upload_status[folder_name] = {

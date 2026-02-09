@@ -207,12 +207,12 @@ class EvidenceRecorder:
             f"format={self.evidence_format})"
         )
 
-        # Check if a previous recording is still in progress
+        # Reject new recording if one is still in progress (prevents parallel memory spikes)
         if self._encoding_thread is not None and self._encoding_thread.is_alive():
             logger.warning(
-                "Previous evidence recording still in progress, "
-                "starting new recording in parallel"
+                "Previous evidence recording still in progress, SKIPPING new recording"
             )
+            return evidence_dir
 
         # Spawn background thread for post-roll + encoding
         self._encoding_thread = threading.Thread(

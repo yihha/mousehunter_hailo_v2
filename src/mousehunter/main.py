@@ -121,6 +121,26 @@ class MouseHunterController:
         self._setup_signal_handlers()
 
         self._running = True
+
+        # sd-notify for systemd watchdog (pure-python sdnotify or systemd.daemon)
+        self._sd_notify = None
+        try:
+            import sdnotify
+            self._sd_notify = sdnotify.SystemdNotifier()
+            logger.info("systemd notifier initialized (sdnotify)")
+        except ImportError:
+            try:
+                from systemd.daemon import notify as _sd_notify_func
+                # Wrap in object with notify() method for uniform API
+                class _SdNotifyWrapper:
+                    @staticmethod
+                    def notify(state: str) -> None:
+                        _sd_notify_func(state)
+                self._sd_notify = _SdNotifyWrapper()
+                logger.info("systemd notifier initialized (systemd.daemon)")
+            except ImportError:
+                logger.debug("No systemd notifier available (not running under systemd?)")
+
         logger.info("System initialization complete")
 
         # Start background tasks (store for proper cancellation on shutdown)
@@ -200,11 +220,18 @@ class MouseHunterController:
 
         logger.info("=== MouseHunter System Running ===")
 
+        # Signal systemd that startup is complete
+        if self._sd_notify:
+            self._sd_notify.notify("READY=1")
+
         # Main loop - wait for shutdown
         try:
             while self._running:
                 await asyncio.sleep(1)
                 await self._state_machine_tick()
+                # Systemd watchdog heartbeat
+                if self._sd_notify:
+                    self._sd_notify.notify("WATCHDOG=1")
         except asyncio.CancelledError:
             logger.info("Main loop cancelled")
 
@@ -703,10 +730,19 @@ class MouseHunterController:
             await self._jammer.activate_with_auto_off(jammer_config.lockdown_duration_seconds)
             logger.info("Jammer ACTIVATED - Cat flap BLOCKED")
 
-        # 2. Trigger audio deterrent
+        # 2. Trigger audio deterrent (non-blocking)
         if self._audio:
-            self._audio.play()
-            logger.info("Audio deterrent triggered")
+            try:
+                loop = asyncio.get_running_loop()
+                await asyncio.wait_for(
+                    loop.run_in_executor(None, self._audio.play),
+                    timeout=5.0,
+                )
+                logger.info("Audio deterrent triggered")
+            except asyncio.TimeoutError:
+                logger.warning("Audio play timed out after 5s")
+            except Exception as e:
+                logger.error(f"Audio deterrent error: {e}")
 
         # 3. Send Telegram notification
         if self._telegram:
@@ -789,9 +825,17 @@ class MouseHunterController:
         from mousehunter.config import jammer_config
 
         if self._state == SystemState.LOCKDOWN:
-            # Check if lockdown duration has elapsed
-            if self._lockdown_start and self._jammer:
-                if not self._jammer.is_active:
+            if self._lockdown_start:
+                elapsed = (datetime.now() - self._lockdown_start).total_seconds()
+                # Hard failsafe: force transition after 2x lockdown duration
+                max_lockdown = jammer_config.lockdown_duration_seconds * 2
+                if elapsed >= max_lockdown:
+                    logger.warning(f"LOCKDOWN failsafe triggered after {elapsed:.0f}s")
+                    if self._jammer and self._jammer.is_active:
+                        self._jammer.deactivate("Failsafe timeout")
+                    self._transition_to(SystemState.COOLDOWN)
+                    self._cooldown_start = datetime.now()
+                elif self._jammer and not self._jammer.is_active:
                     # Jammer auto-deactivated, transition to cooldown
                     logger.info("Lockdown complete, entering cooldown")
                     self._transition_to(SystemState.COOLDOWN)

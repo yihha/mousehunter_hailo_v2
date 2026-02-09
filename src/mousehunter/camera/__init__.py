@@ -2,9 +2,9 @@
 Camera module for MouseHunter.
 
 Provides:
-- CameraService: Dual-stream picamera2 setup for inference and evidence
-- CircularBuffer: RAM-based video buffer for pre-event recording
-- VideoEncoder / EvidenceRecorder: H.264 video evidence encoding
+- CameraService: Dual-stream picamera2 + hardware H.264 encoder with CircularOutput2
+- CircularBuffer: Legacy RAM-based raw frame buffer (kept for fallback/testing)
+- VideoEncoder / EvidenceRecorder: Legacy ffmpeg-based encoding (kept for fallback)
 - Frame annotation utilities for detection visualization
 """
 

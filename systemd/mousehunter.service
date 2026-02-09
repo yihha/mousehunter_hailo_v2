@@ -3,7 +3,7 @@ Description=MouseHunter Cat Prey Detection & Interdiction System
 After=network.target
 
 [Service]
-Type=simple
+Type=notify
 User=yi
 Group=yi
 WorkingDirectory=/home/yi/mousehunter_hailo_v2
@@ -15,6 +15,13 @@ EnvironmentFile=-/home/yi/mousehunter_hailo_v2/.env
 
 # Main command
 ExecStart=/home/yi/mousehunter_hailo_v2/venv/bin/python -m mousehunter.main
+
+# Watchdog: systemd kills process if no heartbeat within 30s
+WatchdogSec=30
+
+# Memory limits: prevent OOM freeze (Pi 5 has 8GB, leave 2GB for OS)
+MemoryMax=6G
+MemoryHigh=5G
 
 # Restart policy
 Restart=always
