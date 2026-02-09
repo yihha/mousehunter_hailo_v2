@@ -7,10 +7,13 @@ Implements the "Zero-Copy" vision pipeline using picamera2:
 
 The main stream is hardware-encoded to H.264 and held in a ~19 MB
 circular buffer (CircularOutput2), replacing the previous 2.7 GB
-raw-frame deque. Evidence is saved as MP4 via FfmpegOutput.
+raw-frame deque. Evidence is saved as raw H.264 via FileOutput,
+then remuxed to MP4 using ffmpeg (-c:v copy, no re-encoding).
 """
 
 import logging
+import shutil
+import subprocess
 import threading
 import time
 from datetime import datetime
@@ -28,30 +31,14 @@ try:
     from picamera2.encoders import H264Encoder
     from picamera2.outputs import CircularOutput2
 
-    # MP4 output: prefer FfmpegOutput (system ffmpeg, reliable) over PyavOutput (pyav library)
-    _MP4OutputClass = None
-    try:
-        from picamera2.outputs import FfmpegOutput
-        _MP4OutputClass = FfmpegOutput
-    except ImportError:
-        pass
-    if _MP4OutputClass is None:
-        try:
-            from picamera2.outputs import PyavOutput
-            _MP4OutputClass = PyavOutput
-        except ImportError:
-            pass
-
-    MP4_OUTPUT_AVAILABLE = _MP4OutputClass is not None
-    if not MP4_OUTPUT_AVAILABLE:
-        logger.warning("No MP4 output available - install ffmpeg or pyav for evidence recording")
+    from picamera2.outputs import FileOutput
 
     PICAMERA_AVAILABLE = True
 except ImportError:
     PICAMERA_AVAILABLE = False
-    MP4_OUTPUT_AVAILABLE = False
-    _MP4OutputClass = None
     logger.warning("picamera2 not available - running in simulation mode")
+
+FFMPEG_AVAILABLE = shutil.which("ffmpeg") is not None
 
 # PIL for on-demand snapshots
 try:
@@ -227,7 +214,7 @@ class CameraService:
             logger.warning("Camera already started")
             return
 
-        if PICAMERA_AVAILABLE and MP4_OUTPUT_AVAILABLE:
+        if PICAMERA_AVAILABLE:
             # Start hardware H.264 encoder with circular buffer
             buffer_ms = int(self.buffer_seconds * 1000)
             self._h264_encoder = H264Encoder(bitrate=5_000_000, repeat=True)
@@ -242,8 +229,6 @@ class CameraService:
             )
         else:
             self._camera.start()
-            if PICAMERA_AVAILABLE:
-                logger.warning("MP4 output unavailable, running without H.264 encoder")
 
         self._started = True
         self._stop_event.clear()
@@ -393,9 +378,9 @@ class CameraService:
         """
         Trigger saving evidence from the circular H.264 buffer.
 
-        Opens an MP4 output (FfmpegOutput or PyavOutput) to write the
-        buffered pre-roll + live post-roll. A background thread handles
-        the post-roll timing and calls close_output() when done.
+        Writes raw H.264 from the circular buffer via FileOutput, then
+        remuxes to MP4 with ffmpeg. A background thread handles the
+        post-roll timing, close_output(), and ffmpeg remux.
 
         Args:
             event_name: Name for the event folder
@@ -411,25 +396,26 @@ class CameraService:
             logger.warning("Evidence recording already in progress, SKIPPING")
             return evidence_dir
 
-        if not PICAMERA_AVAILABLE or not MP4_OUTPUT_AVAILABLE or not self._circular_output:
+        if not PICAMERA_AVAILABLE or not self._circular_output:
             logger.warning("CircularOutput2 not available, cannot save video evidence")
             return evidence_dir
 
-        output_path = evidence_dir / "evidence.mp4"
+        h264_path = evidence_dir / "evidence.h264"
+        mp4_path = evidence_dir / "evidence.mp4"
 
         try:
-            # Open output: flushes circular buffer (pre-roll) + continues recording
-            self._circular_output.open_output(_MP4OutputClass(str(output_path)))
+            # Write raw H.264 to file (FileOutput is reliable, unlike pipe-based outputs)
+            self._circular_output.open_output(FileOutput(str(h264_path)))
             self._evidence_recording = True
             logger.info(
-                f"Evidence recording started: {output_path} "
+                f"Evidence recording started: {h264_path} "
                 f"(pre-roll={self.buffer_seconds}s, post-roll={self.post_roll_seconds}s)"
             )
 
-            # Background thread to wait for post-roll then close
+            # Background thread to wait for post-roll then close + remux
             self._evidence_thread = threading.Thread(
                 target=self._evidence_post_roll,
-                args=(evidence_dir, output_path),
+                args=(evidence_dir, h264_path, mp4_path),
                 name="EvidencePostRollThread",
                 daemon=True,
             )
@@ -441,23 +427,57 @@ class CameraService:
 
         return evidence_dir
 
-    def _evidence_post_roll(self, evidence_dir: Path, output_path: Path) -> None:
-        """Background thread: wait for post-roll duration, then close the output."""
+    def _evidence_post_roll(self, evidence_dir: Path, h264_path: Path, mp4_path: Path) -> None:
+        """Background thread: wait for post-roll, close H.264 output, remux to MP4."""
         success = False
         try:
             time.sleep(self.post_roll_seconds)
 
             if self._circular_output:
                 self._circular_output.close_output()
-                logger.info(f"Evidence recording complete: {output_path}")
+                logger.info(f"H.264 recording complete: {h264_path}")
 
-            # Verify the file was created
-            if output_path.exists():
-                file_size_mb = output_path.stat().st_size / (1024 * 1024)
-                logger.info(f"Evidence file: {output_path} ({file_size_mb:.1f}MB)")
-                success = True
+            # Verify H.264 file was created
+            if not h264_path.exists() or h264_path.stat().st_size == 0:
+                logger.error(f"H.264 file not created or empty: {h264_path}")
+                return
+
+            h264_size_mb = h264_path.stat().st_size / (1024 * 1024)
+            logger.info(f"H.264 file: {h264_path} ({h264_size_mb:.1f}MB)")
+
+            # Remux H.264 → MP4 using ffmpeg (no re-encoding, just container wrapping)
+            if FFMPEG_AVAILABLE:
+                try:
+                    result = subprocess.run(
+                        [
+                            "ffmpeg", "-y",
+                            "-f", "h264",
+                            "-i", str(h264_path),
+                            "-c:v", "copy",
+                            "-movflags", "+faststart",
+                            str(mp4_path),
+                        ],
+                        capture_output=True,
+                        timeout=60,
+                    )
+                    if result.returncode == 0 and mp4_path.exists():
+                        mp4_size_mb = mp4_path.stat().st_size / (1024 * 1024)
+                        logger.info(f"Evidence MP4: {mp4_path} ({mp4_size_mb:.1f}MB)")
+                        h264_path.unlink()  # clean up raw H.264
+                        success = True
+                    else:
+                        logger.error(
+                            f"ffmpeg remux failed (rc={result.returncode}): "
+                            f"{result.stderr.decode(errors='replace')[:500]}"
+                        )
+                except subprocess.TimeoutExpired:
+                    logger.error("ffmpeg remux timed out (60s)")
+                except Exception as e:
+                    logger.error(f"ffmpeg remux error: {e}")
             else:
-                logger.error(f"Evidence file not created: {output_path}")
+                # No ffmpeg — keep raw H.264 as evidence
+                logger.warning(f"ffmpeg not available, keeping raw H.264: {h264_path}")
+                success = True
 
         except Exception as e:
             logger.error(f"Evidence post-roll error: {e}", exc_info=True)
@@ -554,7 +574,7 @@ def test_camera() -> None:
     logging.basicConfig(level=logging.INFO)
     print("=== Camera Service Test ===")
     print(f"PiCamera Available: {PICAMERA_AVAILABLE}")
-    print(f"MP4 Output Available: {MP4_OUTPUT_AVAILABLE} ({_MP4OutputClass.__name__ if _MP4OutputClass else 'none'})")
+    print(f"ffmpeg Available: {FFMPEG_AVAILABLE}")
 
     camera = CameraService(
         main_resolution=(1920, 1080),

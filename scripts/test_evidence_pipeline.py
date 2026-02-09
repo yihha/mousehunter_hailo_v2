@@ -168,30 +168,20 @@ def main():
         _print_summary()
         return
 
-    # MP4 Output — prefer FfmpegOutput (system ffmpeg), fallback to MP4OutputClass (pyav)
-    MP4OutputClass = None
+    # FileOutput (for raw H.264 capture)
     try:
-        from picamera2.outputs import FfmpegOutput
-        MP4OutputClass = FfmpegOutput
-        record("FfmpegOutput import", True, "(preferred — uses system ffmpeg)")
+        from picamera2.outputs import FileOutput
+        record("FileOutput import", True)
     except ImportError:
-        record_skip("FfmpegOutput import", "not available, trying PyavOutput")
-
-    if MP4OutputClass is None:
-        try:
-            from picamera2.outputs import PyavOutput
-            MP4OutputClass = PyavOutput
-            record("PyavOutput import", True, "(fallback — uses pyav library)")
-        except ImportError:
-            record("PyavOutput import", False, "pip install av (or upgrade picamera2)")
-
-    if MP4OutputClass is None:
-        record("MP4 output class", False, "neither FfmpegOutput nor PyavOutput available")
-        print("\nCannot proceed without an MP4 output. Exiting.")
+        record("FileOutput import", False, "upgrade picamera2")
+        print("\nCannot proceed without FileOutput. Exiting.")
         _print_summary()
         return
 
-    record("MP4 output class", True, f"using {MP4OutputClass.__name__}")
+    # ffmpeg (for H.264 → MP4 remux)
+    import shutil
+    ffmpeg_path = shutil.which("ffmpeg")
+    record("ffmpeg available", ffmpeg_path is not None, ffmpeg_path or "not found in PATH")
 
     # PIL
     try:
@@ -291,6 +281,7 @@ def main():
         mem_before = get_rss_mb()
         evidence_dir = output_dir / "prey_test_001"
         evidence_dir.mkdir(parents=True, exist_ok=True)
+        h264_path = evidence_dir / "evidence.h264"
         mp4_path = evidence_dir / "evidence.mp4"
 
         completion_event = threading.Event()
@@ -299,9 +290,9 @@ def main():
         post_roll_seconds = 5  # short for testing
 
         try:
-            # Open output — flushes pre-roll buffer into file
-            circular.open_output(MP4OutputClass(str(mp4_path)))
-            record(f"circular.open_output({MP4OutputClass.__name__}(...))", True)
+            # Open FileOutput — writes raw H.264 to disk (always works)
+            circular.open_output(FileOutput(str(h264_path)))
+            record("circular.open_output(FileOutput(...))", True)
         except Exception as e:
             record("circular.open_output", False, str(e))
             picam2.stop_recording()
@@ -339,18 +330,43 @@ def main():
             + (f", error={completion_result.get('error')}" if not completion_result.get("success") else ""),
         )
 
-        # ── Test 4: MP4 validity ─────────────────────────────────────
+        # ── Test 4: H.264 file + ffmpeg remux to MP4 ─────────────────
         print()
-        print("--- Test 4: MP4 File Validity ---")
+        print("--- Test 4: H.264 File + ffmpeg Remux ---")
 
-        valid, detail = is_valid_mp4(mp4_path)
-        record("MP4 header check", valid, detail)
+        h264_exists = h264_path.exists() and h264_path.stat().st_size > 0
+        record(
+            "H.264 file created",
+            h264_exists,
+            f"{h264_path.stat().st_size / 1024:.1f} KB" if h264_exists else "file missing or empty",
+        )
 
-        probe_ok, probe_detail = probe_mp4_with_ffprobe(mp4_path)
-        if "not installed" in probe_detail:
-            record_skip("ffprobe validation", probe_detail)
-        else:
-            record("ffprobe validation", probe_ok, probe_detail)
+        if h264_exists and ffmpeg_path:
+            try:
+                result = subprocess.run(
+                    ["ffmpeg", "-y", "-f", "h264", "-i", str(h264_path),
+                     "-c:v", "copy", "-movflags", "+faststart", str(mp4_path)],
+                    capture_output=True, timeout=30,
+                )
+                remux_ok = result.returncode == 0 and mp4_path.exists()
+                record(
+                    "ffmpeg remux H.264 → MP4",
+                    remux_ok,
+                    f"{mp4_path.stat().st_size / 1024:.1f} KB" if remux_ok
+                    else result.stderr.decode(errors="replace")[:200],
+                )
+            except Exception as e:
+                record("ffmpeg remux", False, str(e))
+
+        if mp4_path.exists():
+            valid, detail = is_valid_mp4(mp4_path)
+            record("MP4 header check", valid, detail)
+
+            probe_ok, probe_detail = probe_mp4_with_ffprobe(mp4_path)
+            if "not installed" in probe_detail:
+                record_skip("ffprobe validation", probe_detail)
+            else:
+                record("ffprobe validation", probe_ok, probe_detail)
 
         # ── Test 5: Thread safety (close from different thread) ──────
         print()
@@ -366,14 +382,14 @@ def main():
         print("--- Test 6: Evidence Serialization Guard ---")
 
         # Start a new evidence save
-        mp4_path_2 = evidence_dir / "evidence_2.mp4"
+        h264_path_2 = evidence_dir / "evidence_2.h264"
         try:
-            circular.open_output(MP4OutputClass(str(mp4_path_2)))
+            circular.open_output(FileOutput(str(h264_path_2)))
             # Try to open a SECOND output while first is active — should fail or be rejected
-            mp4_path_3 = evidence_dir / "evidence_3.mp4"
+            h264_path_3 = evidence_dir / "evidence_3.h264"
             second_rejected = False
             try:
-                circular.open_output(MP4OutputClass(str(mp4_path_3)))
+                circular.open_output(FileOutput(str(h264_path_3)))
                 # If it didn't raise, close it
                 circular.close_output()
                 # CircularOutput2 might silently close previous — check if documented
