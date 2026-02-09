@@ -1,9 +1,6 @@
 # MouseHunter Hailo v2 - Requirements for Raspberry Pi 5 + AI HAT+
 # Install with: pip install -r requirements.txt
 
-# Core async framework
-asyncio-mqtt>=0.16.0
-
 # Camera - Pi 5 libcamera bindings
 picamera2>=0.3.19
 
@@ -23,11 +20,14 @@ uvicorn[standard]>=0.27.0
 # Configuration management
 pydantic>=2.5.0
 pydantic-settings>=2.1.0
+python-dotenv>=1.0.0
 
 # Retry logic
 tenacity>=8.2.0
 
 # Image processing (minimal - mostly handled by Hailo)
+numpy>=1.26.0
+Pillow>=10.0.0
 
 # System monitoring
 psutil>=5.9.0
@@ -38,3 +38,6 @@ pygame>=2.5.0
 # HTTP client for webhooks
 httpx>=0.26.0
 aiohttp>=3.9.0
+
+# Systemd watchdog integration
+sdnotify>=0.3.0

@@ -69,7 +69,11 @@ htmlcov/
 .claude/
 tmpclaude-*
 
-# local testing
+# local testing / ad-hoc scripts (not part of test suite)
 stream_hailo_mjpeg.py
 verify_full_stack.py
+test_hailo_*.py
+test_hardware.py
+test_live_detection.py
+test_video_inference.py
 

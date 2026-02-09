@@ -295,8 +295,6 @@ def get_jammer() -> Jammer:
     return _jammer_instance
 
 
-# Convenience alias
-jammer = property(lambda self: get_jammer())
 
 
 def test_jammer() -> None:

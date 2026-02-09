@@ -17,6 +17,8 @@ from datetime import datetime
 from io import BytesIO
 from typing import Any
 
+from mousehunter import __version__
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -86,7 +88,7 @@ def create_app() -> "FastAPI":
     app = FastAPI(
         title="MouseHunter API",
         description="REST API for Cat Prey Detection & Interdiction System",
-        version="2.0.0",
+        version=__version__,
     )
 
     # ==================== Status Endpoints ====================
@@ -96,7 +98,7 @@ def create_app() -> "FastAPI":
         """Root endpoint - basic health check."""
         return {
             "service": "MouseHunter",
-            "version": "2.0.0",
+            "version": __version__,
             "status": "running",
             "timestamp": datetime.now().isoformat(),
         }

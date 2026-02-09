@@ -285,8 +285,6 @@ def get_audio_deterrent() -> AudioDeterrent:
     return _audio_instance
 
 
-# Convenience alias
-audio_deterrent = property(lambda self: get_audio_deterrent())
 
 
 def test_audio() -> None:

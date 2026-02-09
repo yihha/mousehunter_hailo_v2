@@ -6,7 +6,7 @@ Provides interfaces for:
 - AudioDeterrent: Sound playback for startling cats
 """
 
-from .jammer import Jammer, jammer
-from .audio import AudioDeterrent, audio_deterrent
+from .jammer import Jammer, get_jammer
+from .audio import AudioDeterrent, get_audio_deterrent
 
-__all__ = ["Jammer", "jammer", "AudioDeterrent", "audio_deterrent"]
+__all__ = ["Jammer", "get_jammer", "AudioDeterrent", "get_audio_deterrent"]

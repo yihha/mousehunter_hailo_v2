@@ -177,8 +177,8 @@ Edit `config/config.json` or use environment variables:
         "classes": {"0": "cat", "1": "rodent"},
         "reg_max": 8,
         "thresholds": {
-            "cat": 0.50,
-            "rodent": 0.20
+            "cat": 0.60,
+            "rodent": 0.35
         },
         "spatial_validation": {
             "enabled": true,
@@ -236,18 +236,17 @@ Default: `http://localhost:8080`
 ## State Machine
 
 ```
-IDLE -----> MONITORING -----> VERIFYING -----> LOCKDOWN -----> COOLDOWN -----> IDLE
-  ^              |                 |                |                             |
-  |              |                 |                |                             |
-  +--------------+-----------------+----------------+-----------------------------+
-       (cat lost)      (no prey)      (auto-timeout)        (cooldown complete)
+IDLE -----> VERIFYING -----> LOCKDOWN -----> COOLDOWN -----> IDLE
+  ^              |                |                             |
+  |              |                |                             |
+  +--------------+----------------+-----------------------------+
+       (no prey)      (auto-timeout)        (cooldown complete)
 ```
 
 ### Cat-as-Anchor Strategy
 The system uses a "cat-as-anchor" approach - prey is only confirmed when detected near a cat:
 
-- **IDLE**: No cat detected, waiting for cat
-- **MONITORING**: Cat detected, now watching for prey
+- **IDLE**: No cat detected, waiting for cat (prey detector internally monitors for cats)
 - **VERIFYING**: Prey detected near cat, accumulating confidence score
 - **LOCKDOWN**: Prey confirmed (score ≥ 0.9), jammer active, notifications sent
 - **COOLDOWN**: Post-lockdown period before returning to normal
@@ -277,7 +276,7 @@ main.py (Async Controller)
     |       +-- audio.py (USB Audio)
     |
     +-- storage/
-    |       |-- cloud_upload.py (rclone integration)
+    |       |-- cloud_storage.py (rclone integration)
     |       +-- training_data.py (Capture for model improvement)
     |
     +-- notifications/
