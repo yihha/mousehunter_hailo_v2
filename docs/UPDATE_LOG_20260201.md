@@ -886,7 +886,7 @@ Key changes:
 - Removed `CircularVideoBuffer` dependency from camera_service (legacy file kept for fallback)
 - Removed `EvidenceRecorder` dependency from camera_service (legacy file kept for fallback)
 - Capture loop now only captures lores stream for inference (no main frame copies)
-- Snapshots (`capture_snapshot_bytes`, `get_main_frame`, `save_snapshot`) use on-demand `capture_array("main")`
+- Snapshots (`capture_snapshot_bytes`, `get_main_frame`, `save_snapshot`) use on-demand `capture_array("lores")` (RGB888)
 - Evidence serialization guard: `self._evidence_recording` flag prevents parallel saves
 - `on_evidence_complete` callbacks now owned directly by CameraService
 
@@ -950,13 +950,15 @@ Changed parallel recording behavior to rejection:
 - Keyframe is still saved by main.py before `trigger_evidence_save` is called
 - Defense-in-depth: with Fix 1, evidence recording no longer accumulates raw frames
 
-### Known Issue to Verify on Pi
+### YUV420 Snapshot Bug — FIXED
 
-**`capture_array("main")` with YUV420 stream**: When the main stream is configured as YUV420, `capture_array("main")` may return YUV420 data instead of RGB. If so, `Image.fromarray()` in `capture_snapshot_bytes()` and `save_snapshot()` would produce garbled images.
+**Issue**: `capture_array("main")` with YUV420 stream returns a 2D array of shape `(height * 3 // 2, stride)` — raw YUV420 planar data, NOT RGB. `Image.fromarray()` on this produces garbled greyscale images with scrambled UV data at the bottom. picamera2 does NOT auto-convert; `capture_image("main")` also raises `RuntimeError` for YUV420.
 
-**Potential fix**: Use `capture_array("lores")` (which is RGB888 at 640x640) for snapshot functions. This is adequate for Telegram notifications and API endpoints. Needs testing on Pi to confirm behavior.
+**Affected methods**: `capture_snapshot_bytes()`, `save_snapshot()`, `get_main_frame()`.
 
-**Alternatively**: picamera2 may auto-convert to RGB when `capture_array()` is called. Needs verification.
+**Fix applied**: All three methods now use `capture_array("lores")` which returns RGB888 at 640x640. This resolution is adequate for all callers (Telegram notifications, /photo command, REST API). The mock camera was also updated to return a realistic YUV420-shaped 2D array for the main stream.
+
+**Alternative considered but rejected**: Converting with `cv2.cvtColor(frame, cv2.COLOR_YUV420p2RGB)` — adds OpenCV dependency for snapshots and the full 1080p resolution is unnecessary for notification images.
 
 ### Files Modified
 
@@ -971,8 +973,8 @@ Changed parallel recording behavior to rejection:
 
 ### Remaining TODO
 
-- [ ] **Verify `capture_array("main")` format on Pi** — does it return RGB or YUV420 when main stream is YUV420?
-- [ ] If YUV420: change `capture_snapshot_bytes()` and `save_snapshot()` to use lores stream
+- [x] ~~**Verify `capture_array("main")` format on Pi**~~ — confirmed: returns YUV420 2D array, NOT RGB
+- [x] ~~Change `capture_snapshot_bytes()`, `save_snapshot()`, `get_main_frame()` to use lores stream~~ — DONE
 - [ ] **Install sdnotify**: `pip install sdnotify` in the venv on Pi
 - [ ] **Test evidence MP4 on Pi**: verify CircularOutput2 → PyavOutput produces valid MP4
 - [ ] **Test /photo command**: verify Telegram snapshot still works with new capture method
@@ -994,4 +996,4 @@ sudo journalctl -u mousehunter -f  # watch logs
 
 ---
 
-*Log updated: February 8, 2026 (Session 7 - System Freeze Fix)*
+*Log updated: February 8, 2026 (Session 7 - System Freeze Fix + YUV420 snapshot fix)*

@@ -89,7 +89,9 @@ class MockPicamera2:
         """Generate a mock frame."""
         if stream == "lores":
             return np.random.randint(0, 255, (640, 640, 3), dtype=np.uint8)
-        return np.random.randint(0, 255, (1080, 1920, 3), dtype=np.uint8)
+        # Main stream is YUV420: shape (height * 3 // 2, width) - 2D array
+        # Simulating this keeps mock behavior consistent with real camera
+        return np.random.randint(0, 255, (1080 * 3 // 2, 1920), dtype=np.uint8)
 
     def capture_buffer(self, stream: str = "main"):
         return self.capture_array(stream)
@@ -109,7 +111,8 @@ class CameraService:
 
     The capture thread only reads the lores stream for inference.
     The main stream is handled entirely by the hardware encoder pipeline.
-    On-demand snapshots use capture_array("main") which returns RGB.
+    On-demand snapshots use the lores stream (RGB888) since the main stream
+    is YUV420 and cannot be directly used with PIL Image.fromarray().
     """
 
     def __init__(
@@ -325,29 +328,31 @@ class CameraService:
 
     def get_main_frame(self) -> tuple[np.ndarray | None, datetime | None]:
         """
-        Get a high-resolution frame on-demand via capture_array.
+        Get an RGB frame on-demand via capture_array.
 
-        Note: This captures a single frame from the main stream. It does NOT
-        read from the circular buffer. Use sparingly (e.g., for snapshots).
+        Returns the lores stream (640x640 RGB888) because the main stream
+        is YUV420 (required for hardware H.264 encoding) and cannot be
+        directly used as RGB with Image.fromarray().
         """
         if not self._started:
             return None, None
         try:
-            frame = self._camera.capture_array("main")
+            frame = self._camera.capture_array("lores")
             return frame, datetime.now()
         except Exception as e:
-            logger.error(f"Failed to capture main frame: {e}")
+            logger.error(f"Failed to capture frame: {e}")
             return None, None
 
     def capture_snapshot_bytes(self, quality: int = 85) -> bytes | None:
-        """Capture current frame as JPEG bytes (on-demand from main stream)."""
+        """Capture current frame as JPEG bytes (from lores RGB stream)."""
         if not self._started:
             return None
         if not PIL_AVAILABLE:
             logger.error("PIL not available for snapshot encoding")
             return None
         try:
-            frame = self._camera.capture_array("main")
+            # Use lores stream (RGB888) - main stream is YUV420 for hw encoder
+            frame = self._camera.capture_array("lores")
             img = Image.fromarray(frame)
             buf = BytesIO()
             img.save(buf, "JPEG", quality=quality)
@@ -357,11 +362,12 @@ class CameraService:
             return None
 
     def save_snapshot(self, filename: str | None = None) -> Path | None:
-        """Save current frame as JPEG file."""
+        """Save current frame as JPEG file (from lores RGB stream)."""
         if not self._started or not PIL_AVAILABLE:
             return None
         try:
-            frame = self._camera.capture_array("main")
+            # Use lores stream (RGB888) - main stream is YUV420 for hw encoder
+            frame = self._camera.capture_array("lores")
             filename = filename or f"snapshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
             filepath = self.output_dir / filename
             img = Image.fromarray(frame)
