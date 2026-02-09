@@ -263,8 +263,8 @@ Instead of requiring consecutive frames, the system uses time-based score accumu
 main.py (Async Controller)
     |
     +-- camera/ (Dual-stream PiCamera2)
-    |       |-- camera_service.py
-    |       +-- circular_buffer.py
+    |       |-- camera_service.py (H.264 encoder + CircularOutput2)
+    |       +-- frame_annotator.py (PIL bounding box drawing)
     |
     +-- inference/ (Hailo-8L)
     |       |-- hailo_engine.py
@@ -284,6 +284,75 @@ main.py (Async Controller)
     |
     +-- api/
             +-- server.py (FastAPI)
+```
+
+## Evidence Pipeline
+
+### Dual-Stream Camera (Always Running)
+
+The camera runs two parallel streams 24/7:
+
+```
+PiCamera 3 NoIR
+    |
+    |──► Main stream (1920x1080 YUV420)
+    |        |
+    |        └──► H264Encoder (hardware, 5 Mbps)
+    |                 |
+    |                 └──► CircularOutput2 (15s ring buffer, ~9 MB RAM)
+    |                        Constantly overwriting old frames.
+    |                        No file on disk — just RAM.
+    |
+    └──► Lores stream (640x640 RGB888)
+             |
+             └──► CameraCaptureThread (30 fps)
+                      |
+                      └──► frame callbacks → HailoEngine → PreyDetector
+```
+
+- **Main stream**: Hardware-encoded to H.264 by the Pi's ISP, fed into a `CircularOutput2` ring buffer. Runs silently in the background — no disk I/O, ~9 MB of RAM holds the last 15 seconds of encoded video.
+- **Lores stream**: 640x640 RGB frames processed by the Hailo-8L NPU for YOLO inference at 30 fps.
+
+### What Happens When Prey is Detected
+
+When the `PreyDetector` score accumulation reaches threshold (≥ 0.9), three things happen simultaneously:
+
+#### 1. Annotated Keyframe (instant)
+An annotated JPEG with bounding boxes (green=cat, red=rodent) is saved from the lores inference frame.
+
+#### 2. Video Evidence (background thread)
+```
+open_output(PyavOutput("evidence.mp4"))
+    │
+    │  CircularOutput2 starts writing frames to the MP4.
+    │  Pre-buffered frames gradually flush as new frames arrive.
+    │
+    ├── sleep(post_roll_seconds)     ← wait 15s for post-roll footage
+    │
+    ├── circular.stop()              ← flush ALL remaining buffered frames
+    │                                   (bypasses delayed-write age check)
+    │                                   PyavOutput finalizes the MP4 file
+    │
+    └── circular.start()             ← resume ring buffer for next event
+```
+
+**Key detail**: `CircularOutput2._flush()` uses a delayed-write design — frames are only written when they are older than `buffer_duration_ms`. Calling `stop()` bypasses this check and flushes everything. Using `close_output()` would lose unwritten frames.
+
+#### 3. Lockdown Actions (async, on main event loop)
+- Activate jammer (GPIO relay → 134.2kHz RFID interference → blocks cat flap)
+- Play hawk screech (USB audio deterrent)
+- Send Telegram notification with the annotated keyframe image
+
+### After Evidence is Saved
+
+When the background thread finishes, the `on_evidence_complete` callback fires, scheduling a cloud upload via rclone (if configured).
+
+### Evidence Output
+
+```
+runtime/recordings/prey_20260209_115350/
+    ├── evidence.mp4          ← ~6 MB, ~30s video (15s pre-roll + 15s post-roll)
+    └── keyframe_trigger.jpg  ← annotated 640x640 frame with bounding boxes
 ```
 
 ## Troubleshooting

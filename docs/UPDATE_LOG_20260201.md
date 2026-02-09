@@ -902,10 +902,13 @@ circular = CircularOutput2(buffer_duration_ms=15000)
 picam2.start_recording(encoder, circular)
 
 # On trigger:
-circular.open_output(PyavOutput("evidence.mp4"))  # flushes pre-roll
+circular.open_output(PyavOutput("evidence.mp4"))  # start writing to MP4
 time.sleep(post_roll_seconds)                      # in background thread
-circular.close_output()                             # finalizes MP4
+circular.stop()                                     # flush ALL frames, finalize MP4
+circular.start()                                    # resume buffering for next event
 ```
+
+**Note**: Must use `stop()` not `close_output()`. See Session 8 for the delayed-write bug discovery.
 
 #### Fix 2: Systemd Watchdog + Memory Limits (mousehunter.service, main.py)
 
@@ -975,8 +978,8 @@ Changed parallel recording behavior to rejection:
 
 - [x] ~~**Verify `capture_array("main")` format on Pi**~~ — confirmed: returns YUV420 2D array, NOT RGB
 - [x] ~~Change `capture_snapshot_bytes()`, `save_snapshot()`, `get_main_frame()` to use lores stream~~ — DONE
-- [ ] **Install sdnotify**: `pip install sdnotify` in the venv on Pi
-- [ ] **Test evidence MP4 on Pi**: verify CircularOutput2 → PyavOutput produces valid MP4
+- [x] ~~**Install sdnotify**~~ — installed v0.3.2 in venv on Pi (Session 8)
+- [x] ~~**Test evidence MP4 on Pi**~~ — 28/28 tests passed, 6 MB MP4 output confirmed (Session 8)
 - [ ] **Test /photo command**: verify Telegram snapshot still works with new capture method
 - [ ] **Monitor memory**: `htop` during prey detection — should stay flat at ~1-2 GB
 - [ ] **Test systemd watchdog**: `sudo journalctl -u mousehunter | grep WATCHDOG`
@@ -997,3 +1000,150 @@ sudo journalctl -u mousehunter -f  # watch logs
 ---
 
 *Log updated: February 8, 2026 (Session 7 - System Freeze Fix + YUV420 snapshot fix)*
+
+---
+
+## Session 8: Production Audit + Evidence Pipeline Fix (February 9, 2026)
+
+### Part 1: Production Readiness Audit (12 Fixes)
+
+Complete file-by-file review of the entire repository. Found and fixed 12 issues:
+
+#### Critical
+
+| # | Issue | File(s) | Fix |
+|---|-------|---------|-----|
+| 1 | Version chaos (2.0.0 in pyproject.toml vs 3.0.0 elsewhere) | `pyproject.toml` | Synced to 3.0.0, `server.py` now imports `__version__` |
+| 2 | `sdnotify` not in any requirements file | `requirements.txt`, `requirements.pi.txt` | Added to both |
+| 3 | `requirements.pi.txt` missing numpy, Pillow, python-dotenv | `requirements.pi.txt` | Added all three |
+
+#### Important
+
+| # | Issue | File(s) | Fix |
+|---|-------|---------|-----|
+| 4 | Config fallback had rodent threshold 0.30, config.json says 0.35 | `config.py` | Changed default to 0.35 |
+| 5 | Broken `property()` aliases in jammer.py and audio.py | `jammer.py`, `audio.py`, `__init__.py` | Removed aliases, exports use `get_jammer`/`get_audio_deterrent` |
+| 6 | `asyncio-mqtt` in requirements but not used anywhere | `requirements.txt` | Removed |
+| 7 | Stale test files in repo root (gitignored pattern didn't cover scripts/) | `.gitignore` | Added root-level test file patterns |
+| 8 | `python-dotenv` used by Pydantic BaseSettings but not declared | `requirements.txt` | Added |
+
+#### Minor
+
+| # | Issue | File(s) | Fix |
+|---|-------|---------|-----|
+| 9 | README state machine shows MONITORING state (doesn't exist) | `README.md` | Removed, matches actual code |
+| 10 | README says `cloud_upload.py` (wrong filename) | `README.md` | Fixed to `cloud_storage.py` |
+| 11 | README thresholds don't match config.json | `README.md` | Updated to 0.60/0.35 |
+| 12 | pyproject.toml had "Beta" classifier | `pyproject.toml` | Changed to "Production/Stable" |
+
+All 64 unit tests passed after fixes. Committed as `fa0194f`.
+
+---
+
+### Part 2: Evidence Pipeline Fix (CircularOutput2 Delayed-Write Bug)
+
+#### The Problem
+
+The evidence pipeline (introduced in Session 7) failed to produce MP4 files on the Pi. Three output backends were tried — `PyavOutput`, `FfmpegOutput`, `FileOutput` — ALL produced empty or missing files despite `open_output()` and `close_output()` succeeding without error.
+
+#### Root Cause Discovery
+
+`CircularOutput2._flush()` uses a **delayed-write design**:
+
+```python
+# Inside _flush():
+if timestamp_now and timestamp_now - timestamp < self.buffer_duration_ms * 1000:
+    break  # Frame not old enough — skip it
+```
+
+Frames are only written to the output when they are **older than `buffer_duration_ms`**. `close_output()` does NOT flush the buffer — it just disconnects the output, and remaining frames are **lost**.
+
+With a 15s buffer and 15s post-roll, most frames were never old enough to be flushed before `close_output()` was called. This affected all three output backends identically — the issue was upstream of the output class.
+
+#### The Fix
+
+Use `stop()` instead of `close_output()`:
+
+```python
+# OLD (broken — frames never flushed):
+self._circular_output.close_output()
+
+# NEW (correct — flushes ALL frames):
+self._circular_output.stop()    # _flush(None, output) bypasses age check
+self._circular_output.start()   # Resume buffering for next event
+```
+
+`stop()` calls `_flush(None, output)` where `timestamp_now=None` **bypasses the age check** and writes ALL remaining buffered frames. After `stop()`, `start()` resumes the circular buffer for the next event (encoder continues unaffected).
+
+Additional changes:
+- Switched to `PyavOutput` for direct MP4 output (no ffmpeg remux needed)
+- Removed `shutil`, `subprocess`, `FFMPEG_AVAILABLE` from camera_service.py
+- Updated test script with correct timing and flush pattern
+
+#### Verification (on Pi)
+
+```
+Evidence Pipeline Test: 28/28 PASSED
+  - MP4 file: 5.5 KB (standalone test), 6.0 MB (CameraService integration)
+  - Duration: 7.5s (test), 8.0s (integration)
+  - Memory delta: +4 MB during evidence save
+  - Thread safety: cross-thread open/stop/start confirmed
+  - Serialization guard: double open_output correctly raises RuntimeError
+```
+
+#### Key Commits
+
+```
+fa0194f  Fix production readiness issues: version sync, missing deps, docs, broken aliases
+e08f696  Add evidence pipeline integration test for Pi validation
+3763f22  Fix MP4 evidence: switch from PyavOutput to FfmpegOutput (FAILED)
+def9df9  Fix evidence pipeline: use FileOutput + ffmpeg remux (FAILED)
+44f8f42  Fix evidence pipeline: use stop()/start() flush instead of close_output() (SUCCESS)
+```
+
+### Files Modified
+
+| File | Change Type | Description |
+|------|------------|-------------|
+| `src/mousehunter/camera/camera_service.py` | Modified | PyavOutput + stop()/start() flush, removed ffmpeg/shutil deps |
+| `scripts/test_evidence_pipeline.py` | Created | 28-test Pi validation suite for evidence pipeline |
+| `pyproject.toml` | Modified | Version 3.0.0, Production/Stable, added sdnotify + python-dotenv |
+| `requirements.txt` | Modified | Removed asyncio-mqtt, added sdnotify + python-dotenv |
+| `requirements.pi.txt` | Modified | Added numpy, Pillow, python-dotenv, sdnotify |
+| `src/mousehunter/config.py` | Modified | Rodent threshold fallback 0.30 → 0.35 |
+| `src/mousehunter/api/server.py` | Modified | Version imports from `__init__` |
+| `src/mousehunter/hardware/jammer.py` | Modified | Removed broken property() alias |
+| `src/mousehunter/hardware/audio.py` | Modified | Removed broken property() alias |
+| `src/mousehunter/hardware/__init__.py` | Modified | Updated exports |
+| `README.md` | Modified | Fixed state machine, thresholds, filenames, added evidence pipeline docs |
+| `.gitignore` | Modified | Added root-level test file patterns |
+
+### Current System Configuration (v3.0.0)
+
+```
+MouseHunter v3.0.0
+Model: YOLOv8n custom (2 classes: cat=0, rodent=1)
+reg_max: 8
+Thresholds: cat=0.60, rodent=0.35
+Confirmation: score_accumulation (3.0s window, 0.9 threshold)
+Spatial validation: enabled (0.25 box expansion)
+Evidence: PyavOutput MP4 + annotated keyframe (stop/start flush)
+  - buffer_seconds: 15 (pre-roll)
+  - post_roll_seconds: 15
+  - evidence_format: "video"
+Training data capture: available (disabled by default)
+Cloud storage: rclone-based (optional)
+Systemd: Type=notify, WatchdogSec=30, MemoryMax=6G
+Hardware: Raspberry Pi 5 + Hailo-8L + PiCamera 3 NoIR
+```
+
+### Remaining TODO
+
+- [ ] **Test /photo command**: verify Telegram snapshot works
+- [ ] **Monitor memory in production**: `htop` during prey detection
+- [ ] **Overnight stability test**: run 12+ hours
+- [ ] **Test systemd watchdog**: verify WATCHDOG=1 heartbeats in journal
+
+---
+
+*Log updated: February 9, 2026 (Session 8 - Production Audit + Evidence Pipeline Fix)*
