@@ -7,7 +7,7 @@ Implements the "Zero-Copy" vision pipeline using picamera2:
 
 The main stream is hardware-encoded to H.264 and held in a ~19 MB
 circular buffer (CircularOutput2), replacing the previous 2.7 GB
-raw-frame deque. Evidence is saved as MP4 via PyavOutput.
+raw-frame deque. Evidence is saved as MP4 via FfmpegOutput.
 """
 
 import logging
@@ -28,18 +28,29 @@ try:
     from picamera2.encoders import H264Encoder
     from picamera2.outputs import CircularOutput2
 
-    # PyavOutput for MP4 muxing (available in picamera2 >= 0.3.17)
+    # MP4 output: prefer FfmpegOutput (system ffmpeg, reliable) over PyavOutput (pyav library)
+    _MP4OutputClass = None
     try:
-        from picamera2.outputs import PyavOutput
-        PYAV_AVAILABLE = True
+        from picamera2.outputs import FfmpegOutput
+        _MP4OutputClass = FfmpegOutput
     except ImportError:
-        PYAV_AVAILABLE = False
-        logger.warning("PyavOutput not available - upgrade picamera2 for MP4 evidence")
+        pass
+    if _MP4OutputClass is None:
+        try:
+            from picamera2.outputs import PyavOutput
+            _MP4OutputClass = PyavOutput
+        except ImportError:
+            pass
+
+    MP4_OUTPUT_AVAILABLE = _MP4OutputClass is not None
+    if not MP4_OUTPUT_AVAILABLE:
+        logger.warning("No MP4 output available - install ffmpeg or pyav for evidence recording")
 
     PICAMERA_AVAILABLE = True
 except ImportError:
     PICAMERA_AVAILABLE = False
-    PYAV_AVAILABLE = False
+    MP4_OUTPUT_AVAILABLE = False
+    _MP4OutputClass = None
     logger.warning("picamera2 not available - running in simulation mode")
 
 # PIL for on-demand snapshots
@@ -216,7 +227,7 @@ class CameraService:
             logger.warning("Camera already started")
             return
 
-        if PICAMERA_AVAILABLE and PYAV_AVAILABLE:
+        if PICAMERA_AVAILABLE and MP4_OUTPUT_AVAILABLE:
             # Start hardware H.264 encoder with circular buffer
             buffer_ms = int(self.buffer_seconds * 1000)
             self._h264_encoder = H264Encoder(bitrate=5_000_000, repeat=True)
@@ -232,7 +243,7 @@ class CameraService:
         else:
             self._camera.start()
             if PICAMERA_AVAILABLE:
-                logger.warning("PyavOutput unavailable, running without H.264 encoder")
+                logger.warning("MP4 output unavailable, running without H.264 encoder")
 
         self._started = True
         self._stop_event.clear()
@@ -382,9 +393,9 @@ class CameraService:
         """
         Trigger saving evidence from the circular H.264 buffer.
 
-        Opens a PyavOutput to write the buffered pre-roll + live post-roll
-        to an MP4 file. A background thread handles the post-roll timing
-        and calls close_output() when done.
+        Opens an MP4 output (FfmpegOutput or PyavOutput) to write the
+        buffered pre-roll + live post-roll. A background thread handles
+        the post-roll timing and calls close_output() when done.
 
         Args:
             event_name: Name for the event folder
@@ -400,7 +411,7 @@ class CameraService:
             logger.warning("Evidence recording already in progress, SKIPPING")
             return evidence_dir
 
-        if not PICAMERA_AVAILABLE or not PYAV_AVAILABLE or not self._circular_output:
+        if not PICAMERA_AVAILABLE or not MP4_OUTPUT_AVAILABLE or not self._circular_output:
             logger.warning("CircularOutput2 not available, cannot save video evidence")
             return evidence_dir
 
@@ -408,7 +419,7 @@ class CameraService:
 
         try:
             # Open output: flushes circular buffer (pre-roll) + continues recording
-            self._circular_output.open_output(PyavOutput(str(output_path)))
+            self._circular_output.open_output(_MP4OutputClass(str(output_path)))
             self._evidence_recording = True
             logger.info(
                 f"Evidence recording started: {output_path} "
@@ -543,7 +554,7 @@ def test_camera() -> None:
     logging.basicConfig(level=logging.INFO)
     print("=== Camera Service Test ===")
     print(f"PiCamera Available: {PICAMERA_AVAILABLE}")
-    print(f"PyavOutput Available: {PYAV_AVAILABLE}")
+    print(f"MP4 Output Available: {MP4_OUTPUT_AVAILABLE} ({_MP4OutputClass.__name__ if _MP4OutputClass else 'none'})")
 
     camera = CameraService(
         main_resolution=(1920, 1080),

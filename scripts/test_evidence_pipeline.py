@@ -2,7 +2,7 @@
 """
 Evidence Pipeline Integration Test — Run on Raspberry Pi
 
-Tests the full CircularOutput2 + H264Encoder + PyavOutput evidence pipeline
+Tests the full CircularOutput2 + H264Encoder + FfmpegOutput evidence pipeline
 that was introduced in Session 7 to replace the raw-frame deque (2.7GB -> 19MB).
 
 Tests:
@@ -19,13 +19,12 @@ Tests:
 Usage:
   python scripts/test_evidence_pipeline.py
 
-Requires: Pi hardware with PiCamera 3, picamera2, PyavOutput (pyav)
+Requires: Pi hardware with PiCamera 3, picamera2, ffmpeg (or pyav)
 """
 
 import gc
 import logging
 import os
-import struct
 import subprocess
 import sys
 import tempfile
@@ -125,7 +124,7 @@ def probe_mp4_with_ffprobe(path: Path) -> tuple[bool, str]:
 def main():
     print("=" * 65)
     print("  MouseHunter Evidence Pipeline Test")
-    print("  Validates CircularOutput2 + H264Encoder + PyavOutput")
+    print("  Validates CircularOutput2 + H264Encoder + FfmpegOutput")
     print("=" * 65)
     print()
 
@@ -169,15 +168,30 @@ def main():
         _print_summary()
         return
 
-    # PyavOutput
+    # MP4 Output — prefer FfmpegOutput (system ffmpeg), fallback to MP4OutputClass (pyav)
+    MP4OutputClass = None
     try:
-        from picamera2.outputs import PyavOutput
-        record("PyavOutput import", True)
+        from picamera2.outputs import FfmpegOutput
+        MP4OutputClass = FfmpegOutput
+        record("FfmpegOutput import", True, "(preferred — uses system ffmpeg)")
     except ImportError:
-        record("PyavOutput import", False, "pip install av (or upgrade picamera2)")
-        print("\nCannot proceed without PyavOutput. Exiting.")
+        record_skip("FfmpegOutput import", "not available, trying PyavOutput")
+
+    if MP4OutputClass is None:
+        try:
+            from picamera2.outputs import PyavOutput
+            MP4OutputClass = PyavOutput
+            record("PyavOutput import", True, "(fallback — uses pyav library)")
+        except ImportError:
+            record("PyavOutput import", False, "pip install av (or upgrade picamera2)")
+
+    if MP4OutputClass is None:
+        record("MP4 output class", False, "neither FfmpegOutput nor PyavOutput available")
+        print("\nCannot proceed without an MP4 output. Exiting.")
         _print_summary()
         return
+
+    record("MP4 output class", True, f"using {MP4OutputClass.__name__}")
 
     # PIL
     try:
@@ -286,8 +300,8 @@ def main():
 
         try:
             # Open output — flushes pre-roll buffer into file
-            circular.open_output(PyavOutput(str(mp4_path)))
-            record("circular.open_output(PyavOutput(...))", True)
+            circular.open_output(MP4OutputClass(str(mp4_path)))
+            record(f"circular.open_output({MP4OutputClass.__name__}(...))", True)
         except Exception as e:
             record("circular.open_output", False, str(e))
             picam2.stop_recording()
@@ -354,12 +368,12 @@ def main():
         # Start a new evidence save
         mp4_path_2 = evidence_dir / "evidence_2.mp4"
         try:
-            circular.open_output(PyavOutput(str(mp4_path_2)))
+            circular.open_output(MP4OutputClass(str(mp4_path_2)))
             # Try to open a SECOND output while first is active — should fail or be rejected
             mp4_path_3 = evidence_dir / "evidence_3.mp4"
             second_rejected = False
             try:
-                circular.open_output(PyavOutput(str(mp4_path_3)))
+                circular.open_output(MP4OutputClass(str(mp4_path_3)))
                 # If it didn't raise, close it
                 circular.close_output()
                 # CircularOutput2 might silently close previous — check if documented
@@ -413,7 +427,7 @@ def main():
         # Now test via CameraService (the actual class used in production)
         try:
             sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-            from mousehunter.camera.camera_service import CameraService, PICAMERA_AVAILABLE, PYAV_AVAILABLE
+            from mousehunter.camera.camera_service import CameraService
 
             svc_dir = output_dir / "svc_test"
             svc = CameraService(
