@@ -304,10 +304,17 @@ class MouseHunterController:
 
             self._detector = PreyDetector(
                 thresholds=inference_config.thresholds,
-                window_size=inference_config.window_size,
-                trigger_count=inference_config.trigger_count,
                 spatial_validation_enabled=inference_config.spatial_validation_enabled,
                 box_expansion=inference_config.box_expansion,
+                # Score accumulation params
+                prey_confirmation_mode=inference_config.prey_confirmation_mode,
+                prey_window_seconds=inference_config.prey_window_seconds,
+                prey_score_threshold=inference_config.prey_score_threshold,
+                prey_min_detection_score=inference_config.prey_min_detection_score,
+                reset_on_cat_lost_seconds=inference_config.reset_on_cat_lost_seconds,
+                # Legacy params
+                window_size=inference_config.window_size,
+                trigger_count=inference_config.trigger_count,
             )
 
             # Register prey detection callback

@@ -41,7 +41,7 @@
         "reg_max": 8,
         "thresholds": {
             "cat": 0.60,
-            "rodent": 0.35
+            "rodent": 0.25
         },
         "spatial_validation": {
             "enabled": true,
@@ -53,7 +53,7 @@
             "window_seconds": 3.0,
             "score_threshold": 0.9,
             "min_detection_score": 0.20,
-            "reset_on_cat_lost_seconds": 1.5
+            "reset_on_cat_lost_seconds": 5.0
         },
         "temporal_smoothing": {
             "_comment": "Legacy frame-based smoothing (kept for backwards compatibility)",
