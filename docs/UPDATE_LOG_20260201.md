@@ -1147,3 +1147,130 @@ Hardware: Raspberry Pi 5 + Hailo-8L + PiCamera 3 NoIR
 ---
 
 *Log updated: February 9, 2026 (Session 8 - Production Audit + Evidence Pipeline Fix)*
+
+---
+
+## Session 9: Prey Detection Tuning — Missed Real Prey Events (February 9, 2026)
+
+### The Incident
+
+Two separate prey events occurred on Feb 9 where the cat came through the cat flap carrying prey, but the system did not trigger lockdown either time. Cat detection was working correctly (Telegram notifications were received). The system had been updated with Session 8 changes earlier the same day.
+
+### Root Cause Analysis
+
+Thorough code review confirmed **no code regression from Session 8** — none of the Session 8 changes (evidence pipeline, version sync, dependency files, docs) affected the detection pipeline.
+
+The real issue was **detection parameter tuning**:
+
+| Factor | Problem |
+|--------|---------|
+| **Rodent threshold too high (0.35)** | Prey carried in cat's mouth is partially occluded → model confidence typically 0.20-0.34 → all detections silently discarded |
+| **Cat-lost reset too aggressive (1.5s)** | Any brief dip in cat confidence below 0.60 wiped all accumulated prey score. At 14 FPS, only ~21 frames of tolerance |
+| **Double threshold filter** | HailoEngine pre-filters at `confidence_threshold` (set via legacy property to rodent threshold), then PreyDetector filters again per-class — both at 0.35, creating a hard wall |
+
+The model's rodent mAP50 of 0.796 was measured on clearly visible rodents. Real-world prey-in-mouth scenarios have much lower confidence due to occlusion.
+
+### Fixes Applied
+
+#### 1. Lower Rodent Threshold (config.json, config.py)
+
+```
+rodent threshold: 0.35 → 0.25
+```
+
+Allows partially occluded prey-in-mouth detections to pass through. False positive protection maintained via:
+- Cat anchor requirement (0.60+)
+- Spatial validation (rodent must overlap/be near cat)
+- Score accumulation still requires 0.9 total
+
+#### 2. Increase Cat-Lost Timeout (config.json)
+
+```
+reset_on_cat_lost_seconds: 1.5 → 5.0
+```
+
+Tolerates brief cat confidence fluctuations without wiping accumulated prey score. The cat's confidence naturally varies as it moves through the frame — 1.5s was too aggressive.
+
+#### 3. Fix PreyDetector Initialization (main.py)
+
+`main.py` was creating `PreyDetector` without passing score accumulation parameters:
+
+**Before:**
+```python
+self._detector = PreyDetector(
+    thresholds=inference_config.thresholds,
+    window_size=inference_config.window_size,
+    trigger_count=inference_config.trigger_count,
+    spatial_validation_enabled=inference_config.spatial_validation_enabled,
+    box_expansion=inference_config.box_expansion,
+)
+```
+
+**After:**
+```python
+self._detector = PreyDetector(
+    thresholds=inference_config.thresholds,
+    spatial_validation_enabled=inference_config.spatial_validation_enabled,
+    box_expansion=inference_config.box_expansion,
+    # Score accumulation params
+    prey_confirmation_mode=inference_config.prey_confirmation_mode,
+    prey_window_seconds=inference_config.prey_window_seconds,
+    prey_score_threshold=inference_config.prey_score_threshold,
+    prey_min_detection_score=inference_config.prey_min_detection_score,
+    reset_on_cat_lost_seconds=inference_config.reset_on_cat_lost_seconds,
+    # Legacy params
+    window_size=inference_config.window_size,
+    trigger_count=inference_config.trigger_count,
+)
+```
+
+Previously relied on Python defaults matching config.json — now explicitly passes all params from config.
+
+### Detection Math
+
+With new parameters (rodent=0.25, score_threshold=0.9, window=3.0s):
+- At 14 FPS, 3-second window = ~42 frames
+- Rodent at 0.25 avg confidence: need ~4 detections (4 × 0.25 = 1.0 ≥ 0.9)
+- That's only 10% of frames — very achievable for real prey
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| `config/config.json` | rodent: 0.35→0.25, reset_on_cat_lost: 1.5→5.0 |
+| `src/mousehunter/config.py` | Fallback default aligned to rodent=0.25 |
+| `src/mousehunter/main.py` | PreyDetector init now passes all score accumulation params |
+
+### Git Commit
+
+```
+d8dd3c1 Tune prey detection: lower rodent threshold, increase cat-lost timeout
+```
+
+### Monitoring Notes
+
+After deployment, watch for:
+- `MONITORING -> VERIFYING` in logs — confirms rodent is being detected
+- `cat lost for X.Xs` — if frequent, cat confidence is fluctuating
+- False positives — if system triggers without prey, raise rodent back to 0.30
+- If 0.25 still misses real prey, lower to 0.20
+
+### Current System Configuration (v3.0.0)
+
+```
+MouseHunter v3.0.0
+Model: YOLOv8n custom (2 classes: cat=0, rodent=1)
+reg_max: 8
+Thresholds: cat=0.60, rodent=0.25  (was 0.35)
+Confirmation: score_accumulation (3.0s window, 0.9 threshold)
+  reset_on_cat_lost_seconds: 5.0  (was 1.5)
+  min_detection_score: 0.20
+Spatial validation: enabled (0.25 box expansion)
+Evidence: PyavOutput MP4 + annotated keyframe (stop/start flush)
+Systemd: Type=notify, WatchdogSec=30, MemoryMax=6G
+Hardware: Raspberry Pi 5 + Hailo-8L + PiCamera 3 NoIR
+```
+
+---
+
+*Log updated: February 9, 2026 (Session 9 - Prey Detection Tuning)*
