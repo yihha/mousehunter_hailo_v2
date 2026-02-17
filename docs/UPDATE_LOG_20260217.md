@@ -266,3 +266,142 @@ All 65 tests pass, 1 skipped (Hailo hardware test — expected on dev machine).
 
 *Commit: `f883ff5` — Pushed to origin/main*
 *Log updated: February 17, 2026*
+
+---
+
+## Session 13: Multi-Label Output + Class-Aware NMS Fix (February 17, 2026)
+
+### Objective
+Prey detection failed AGAIN after Session 11's threshold fixes — cat with mouse in mouth was detected as cat at ~8 meters but rodent was never detected. Investigate the YOLO postprocessing pipeline itself for structural issues beyond threshold tuning.
+
+---
+
+## 1. Root Cause Analysis
+
+### Problem
+Despite lowering all thresholds in Session 11, the rodent signal was still being discarded. The cat was reliably detected at all distances, but prey-in-mouth rodent never appeared in detections.
+
+### Investigation
+Researched standard YOLOv8 postprocessing against the ultralytics reference implementation and found **two deviations** from standard behavior:
+
+| # | Issue | Our Code | Standard YOLOv8 | Impact |
+|---|-------|----------|-----------------|--------|
+| 1 | **Single-label output (argmax)** | `class_id = argmax(class_scores)` — one class per cell | `multi_label=True` — all classes above threshold per cell | Rodent signal discarded at every cell where cat score > rodent score |
+| 2 | **Class-agnostic NMS** | All classes compete in single NMS pass | Class-aware NMS (`agnostic=False`) — NMS runs per class independently | Cat detection suppresses overlapping rodent detection |
+
+### Why This Matters for Prey-in-Mouth
+
+YOLOv8 uses **BCE loss** (Binary Cross-Entropy), meaning class scores are **independent probabilities**, not softmax. A single grid cell can legitimately have both `cat=0.80` and `rodent=0.20` active simultaneously.
+
+With our old code:
+1. **Argmax** selects only the highest class → cell outputs cat (0.80), rodent (0.20) is discarded
+2. Even if a nearby cell happened to output rodent, **class-agnostic NMS** lets the high-confidence cat suppress the overlapping low-confidence rodent
+
+This is the exact prey-in-mouth scenario: cat and rodent bounding boxes physically overlap, and the cat always wins at both stages.
+
+### Additional Bug Found
+`prey_min_detection_count` parameter was **not being passed** from `main.py` to the `PreyDetector` constructor. It fell back to the default value of 3 (which matched config), but was a latent bug.
+
+---
+
+## 2. Solution
+
+### Change 1: Multi-Label Output (hailo_engine.py)
+
+Replaced single-class argmax with per-class iteration:
+
+```python
+# OLD (single-label):
+class_id = int(np.argmax(class_scores))
+max_score = float(class_scores[class_id])
+if max_score >= self.confidence_threshold:
+    all_boxes.append(box)
+    all_scores.append(max_score)
+    all_class_ids.append(class_id)
+
+# NEW (multi-label):
+for class_id in range(num_classes):
+    score = float(class_scores[class_id])
+    if score >= self.confidence_threshold:
+        all_boxes.append(box)
+        all_scores.append(score)
+        all_class_ids.append(class_id)
+```
+
+Now a cell with `cat=0.30, rodent=0.20` produces **two** detections instead of one.
+
+### Change 2: Class-Aware NMS (hailo_engine.py)
+
+Replaced single NMS pass with per-class NMS:
+
+```python
+# OLD (class-agnostic):
+keep_indices = self._nms_numpy(all_boxes, all_scores, iou_threshold)
+
+# NEW (class-aware):
+final_indices = []
+for cls_id in set(all_class_ids):
+    cls_indices = [i for i, c in enumerate(all_class_ids) if c == cls_id]
+    keep = self._nms_numpy(boxes[cls_indices], scores[cls_indices], iou_threshold)
+    for k in keep:
+        final_indices.append(cls_indices[k])
+```
+
+Now cat and rodent detections at the same location **never suppress each other**. Same-class overlapping boxes are still consolidated normally.
+
+### Change 3: Missing Parameter Fix (main.py)
+
+```python
+# Added missing parameter:
+prey_min_detection_count=inference_config.prey_min_detection_count,
+```
+
+---
+
+## 3. Why Session 11 Thresholds Were Necessary But Insufficient
+
+Session 11 fixed the **threshold pipeline** — ensuring weak signals could pass through the engine and reach score accumulation. That was correct and remains in place.
+
+But even with thresholds at 0.10/0.15/0.20, the **argmax + class-agnostic NMS** structurally prevented rodent from appearing at cells dominated by cat features. No threshold tuning could fix this — it was a postprocessing architecture issue.
+
+The full fix requires **both** sessions:
+- Session 11: Low thresholds let weak signals through
+- Session 13: Multi-label + class-aware NMS let rodent signals survive alongside cat
+
+---
+
+## 4. Physical Limitations Acknowledged
+
+At 8 meters, a rodent in a cat's mouth is approximately 5–8 pixels in the 640×640 inference frame. This is at the edge of the P3/stride-8 detection head's practical minimum (~12–16 pixels). Multi-label output helps capture whatever weak signal exists, but very long-range detection may still be unreliable. Closer distances (< 5m) should see significant improvement.
+
+---
+
+## 5. Tests Added
+
+Added `TestMultiLabelPostprocessing` class with 6 new tests using synthetic 20×20 class + box tensors:
+
+| Test | Validates |
+|------|-----------|
+| `test_multi_label_both_classes_output` | Cell with cat=0.30, rodent=0.15 produces TWO detections |
+| `test_multi_label_confidence_values` | Per-class confidence scores are correct |
+| `test_class_below_threshold_not_output` | Class at 0.05 (below engine 0.10) is filtered |
+| `test_class_aware_nms_preserves_overlapping_classes` | Cat + rodent at same location both survive NMS |
+| `test_same_class_nms_still_works` | Overlapping same-class boxes still consolidated |
+| `test_cell_below_threshold_produces_nothing` | All classes below threshold = no output |
+
+All 71 tests pass (65 original + 6 new), 1 skipped (Hailo hardware — expected on dev machine).
+
+---
+
+## 6. Files Changed
+
+| File | Change |
+|------|--------|
+| `src/mousehunter/inference/hailo_engine.py` | Multi-label output (replaced argmax with per-class loop), class-aware NMS (per-class NMS instead of class-agnostic) |
+| `src/mousehunter/main.py` | Added missing `prey_min_detection_count` parameter to PreyDetector constructor |
+| `tests/test_hailo_engine.py` | Added `TestMultiLabelPostprocessing` class with 6 synthetic tensor tests |
+
+---
+
+*Commit: `85a9029` — Pushed to origin/main*
+*Log updated: February 17, 2026*
