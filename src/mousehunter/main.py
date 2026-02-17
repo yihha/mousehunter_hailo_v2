@@ -602,6 +602,13 @@ class MouseHunterController:
         except Exception as e:
             logger.error(f"Lockdown execution failed: {e}", exc_info=True)
 
+    def _notification_callback(self, future) -> None:
+        """Callback to log notification errors (prevents silent failures)."""
+        try:
+            future.result()
+        except Exception as e:
+            logger.error(f"Notification failed: {e}")
+
     def _handle_cat_only(self, cat_detection, all_detections, frame) -> None:
         """
         Handle cat-only detection for training data capture.
@@ -698,10 +705,11 @@ class MouseHunterController:
             return
 
         try:
-            asyncio.run_coroutine_threadsafe(
+            future = asyncio.run_coroutine_threadsafe(
                 self._send_cat_notification(image_bytes),
                 self._main_loop,
             )
+            future.add_done_callback(self._notification_callback)
         except Exception as e:
             logger.error(f"Failed to schedule cat notification: {e}")
 
@@ -714,12 +722,17 @@ class MouseHunterController:
             timestamp = datetime.now().strftime("%H:%M:%S")
             message = f"Cat detected at {timestamp}"
 
-            await self._telegram.send_alert(
-                text=message,
-                image_bytes=image_bytes,
-                include_buttons=False,  # No action buttons for cat-only notification
+            await asyncio.wait_for(
+                self._telegram.send_alert(
+                    text=message,
+                    image_bytes=image_bytes,
+                    include_buttons=False,  # No action buttons for cat-only notification
+                ),
+                timeout=30,
             )
             logger.info("Cat detection notification sent")
+        except asyncio.TimeoutError:
+            logger.error("Cat notification timed out after 30s (retry + API)")
         except Exception as e:
             logger.error(f"Failed to send cat notification: {e}")
 
@@ -765,7 +778,12 @@ class MouseHunterController:
                     f"Cat flap locked for {jammer_config.lockdown_duration_seconds}s.\n"
                     f"Detection #{self._detection_count}"
                 )
-                await self._telegram.send_alert(message, image_bytes, include_buttons=True)
+                await asyncio.wait_for(
+                    self._telegram.send_alert(message, image_bytes, include_buttons=True),
+                    timeout=30,
+                )
+            except asyncio.TimeoutError:
+                logger.error("Prey alert notification timed out after 30s (retry + API)")
             except Exception as e:
                 logger.error(f"Failed to send alert: {e}")
 

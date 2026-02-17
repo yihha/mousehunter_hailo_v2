@@ -34,7 +34,7 @@ try:
         CallbackQueryHandler,
         ContextTypes,
     )
-    from telegram.error import TimedOut, NetworkError, TelegramError
+    from telegram.error import TimedOut, NetworkError, TelegramError, RetryAfter
 
     TELEGRAM_AVAILABLE = True
 except ImportError:
@@ -221,8 +221,12 @@ class TelegramBot:
                 "Prey detection system active.\n"
                 "Use /help for commands."
             )
+            logger.info("Telegram notifications working - startup message sent")
         except Exception as e:
-            logger.error(f"Failed to send startup message: {e}")
+            logger.warning(
+                f"Telegram notifications FAILED - startup message not delivered: {e}. "
+                "Notifications may not work until network is restored."
+            )
 
     # ==================== Command Handlers ====================
 
@@ -393,14 +397,14 @@ class TelegramBot:
     # Build retry exceptions based on availability
     # When TELEGRAM_AVAILABLE, retry on network errors; otherwise no retry for mock mode
     _RETRY_EXCEPTIONS = (
-        (TimedOut, NetworkError, TelegramError, ConnectionError, TimeoutError)
+        (TimedOut, NetworkError, TelegramError, RetryAfter, ConnectionError, TimeoutError)
         if TELEGRAM_AVAILABLE
         else (type(None),)  # Never matches - effectively disables retry for mock
     )
 
     @retry(
         stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=10),
+        wait=wait_exponential(multiplier=1, min=1, max=30),
         retry=retry_if_exception_type(_RETRY_EXCEPTIONS),
         before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True,
@@ -411,12 +415,18 @@ class TelegramBot:
             logger.debug(f"[DISABLED] Would send: {text}")
             return
 
-        await self._app.bot.send_message(chat_id=self.chat_id, text=text)
+        await self._app.bot.send_message(
+            chat_id=self.chat_id,
+            text=text,
+            read_timeout=10,
+            write_timeout=10,
+            connect_timeout=5,
+        )
         logger.debug(f"Message sent: {text[:50]}...")
 
     @retry(
         stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=10),
+        wait=wait_exponential(multiplier=1, min=1, max=30),
         retry=retry_if_exception_type(_RETRY_EXCEPTIONS),
         before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True,
@@ -449,12 +459,18 @@ class TelegramBot:
                 photo=photo,
                 caption=text,
                 reply_markup=keyboard,
+                read_timeout=10,
+                write_timeout=10,
+                connect_timeout=5,
             )
         else:
             await self._app.bot.send_message(
                 chat_id=self.chat_id,
                 text=text,
                 reply_markup=keyboard,
+                read_timeout=10,
+                write_timeout=10,
+                connect_timeout=5,
             )
 
         logger.info(f"Alert sent: {text}")
@@ -525,13 +541,22 @@ def notify_sync(
         return
 
     try:
-        asyncio.run_coroutine_threadsafe(
+        future = asyncio.run_coroutine_threadsafe(
             notify_async(text, image_bytes, include_buttons),
             MAIN_LOOP,
         )
+        future.add_done_callback(_notify_sync_callback)
         logger.debug(f"Notification scheduled from sync context")
     except Exception as e:
         logger.error(f"Failed to schedule notification: {e}")
+
+
+def _notify_sync_callback(future) -> None:
+    """Log errors from fire-and-forget sync notifications."""
+    try:
+        future.result()
+    except Exception as e:
+        logger.error(f"Sync notification failed: {e}")
 
 
 async def test_bot() -> None:
