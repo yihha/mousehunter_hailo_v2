@@ -140,3 +140,129 @@ Verifies dual confirmation:
 
 *Commit: `54c123c` — Pushed to origin/main*
 *Log created: February 17, 2026*
+
+---
+
+## Session 12: Telegram Notification Reliability Fix (February 17, 2026)
+
+### Objective
+Fix silent Telegram notification failures — sometimes timeout, sometimes no response at all with no error logged.
+
+---
+
+## 1. Root Causes Identified
+
+Five issues found causing notification loss:
+
+| # | Issue | Severity | Impact |
+|---|-------|----------|--------|
+| 1 | No explicit timeout on Telegram API calls | HIGH | Default 20s read timeout × 3 retries = 60s+ blocking the event loop |
+| 2 | Cat notification future is fire-and-forget | HIGH | Exceptions silently swallowed — no log, no error, no trace |
+| 3 | No `RetryAfter` handling in retry logic | MEDIUM | Telegram rate-limit responses not retried properly; max retry wait too low (10s) |
+| 4 | `notify_sync()` future never checked | LOW | Same fire-and-forget pattern as #2 |
+| 5 | No clear startup success/failure log | LOW | User has no way to know if notifications are working until one is missed |
+
+---
+
+## 2. Fixes Applied
+
+### Fix 1: Explicit API Timeouts (telegram_bot.py)
+
+Added to all three Telegram API call sites (`send_message`, `send_photo`, text-only `send_message` in `send_alert`):
+
+```python
+await self._app.bot.send_message(
+    chat_id=self.chat_id,
+    text=text,
+    read_timeout=10,
+    write_timeout=10,
+    connect_timeout=5,
+)
+```
+
+**Effect**: Each attempt limited to ~10s instead of 20s default. With 3 retries, worst case is ~30s + backoff instead of 60s+.
+
+### Fix 2: Done Callback on Cat Notification Future (main.py)
+
+Added `_notification_callback()` method and attached it to the cat notification future:
+
+```python
+future = asyncio.run_coroutine_threadsafe(
+    self._send_cat_notification(image_bytes),
+    self._main_loop,
+)
+future.add_done_callback(self._notification_callback)
+```
+
+Now any exception from the coroutine is logged instead of silently swallowed.
+
+### Fix 3: RetryAfter Handling + Increased Max Wait (telegram_bot.py)
+
+- Imported `RetryAfter` from `telegram.error`
+- Added to `_RETRY_EXCEPTIONS` tuple
+- Increased max retry backoff from 10s to 30s (Telegram rate limits can request up to 30s)
+
+### Fix 4: Outer `asyncio.wait_for()` Safety Net (main.py)
+
+Wrapped both `_send_cat_notification()` and `_execute_lockdown()` Telegram sends:
+
+```python
+await asyncio.wait_for(
+    self._telegram.send_alert(message, image_bytes, include_buttons=True),
+    timeout=30,
+)
+```
+
+Prevents the entire main event loop from blocking even if retry + API timeout gets stuck. `asyncio.TimeoutError` caught with clear log message.
+
+### Fix 5: Startup Notification Logging (telegram_bot.py)
+
+```python
+# Success:
+logger.info("Telegram notifications working - startup message sent")
+
+# Failure:
+logger.warning(
+    "Telegram notifications FAILED - startup message not delivered: ... "
+    "Notifications may not work until network is restored."
+)
+```
+
+### Bonus Fix: `notify_sync()` Done Callback (telegram_bot.py)
+
+Added `_notify_sync_callback()` to the fire-and-forget future in the module-level `notify_sync()` function.
+
+---
+
+## 3. Files Changed
+
+| File | Change |
+|------|--------|
+| `src/mousehunter/notifications/telegram_bot.py` | API timeouts (10s/10s/5s), RetryAfter import + retry tuple, max wait 10→30, startup logging, notify_sync callback |
+| `src/mousehunter/main.py` | `_notification_callback()` method, done callback on cat notification, `asyncio.wait_for(timeout=30)` on both send_alert calls |
+
+---
+
+## 4. Timeout Budget Analysis
+
+With all fixes, worst-case timing for a single notification:
+
+| Layer | Per-attempt | Total (3 attempts) |
+|-------|-------------|---------------------|
+| connect_timeout | 5s | 15s |
+| read_timeout | 10s | 30s |
+| retry backoff (exponential, max=30) | — | ~33s (1+2+30) |
+| **Outer wait_for** | — | **30s hard cap** |
+
+The outer `asyncio.wait_for(timeout=30)` cancels everything after 30s regardless — the event loop is never blocked longer than that.
+
+---
+
+## 5. Test Results
+
+All 65 tests pass, 1 skipped (Hailo hardware test — expected on dev machine).
+
+---
+
+*Commit: `f883ff5` — Pushed to origin/main*
+*Log updated: February 17, 2026*
