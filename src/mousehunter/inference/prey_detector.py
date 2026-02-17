@@ -127,10 +127,11 @@ class PreyDetector:
         box_expansion: float = 0.25,
         # Time-based score accumulation (new approach)
         prey_confirmation_mode: str = "score_accumulation",
-        prey_window_seconds: float = 3.0,
+        prey_window_seconds: float = 5.0,
         prey_score_threshold: float = 0.9,
         prey_min_detection_score: float = 0.20,
-        reset_on_cat_lost_seconds: float = 1.5,
+        prey_min_detection_count: int = 3,
+        reset_on_cat_lost_seconds: float = 5.0,
         # Legacy frame-based (kept for backwards compatibility)
         window_size: int = 5,
         trigger_count: int = 3,
@@ -149,13 +150,14 @@ class PreyDetector:
             prey_window_seconds: Time window for score accumulation
             prey_score_threshold: Accumulated score needed to confirm
             prey_min_detection_score: Minimum detection score to count
+            prey_min_detection_count: Minimum separate frames with prey to confirm
             reset_on_cat_lost_seconds: Reset if no cat for this duration
 
             # Legacy parameters (for backwards compatibility)
             window_size: Rolling window size (legacy frame_count mode)
             trigger_count: Positive detections required (legacy frame_count mode)
         """
-        self.thresholds = thresholds or {"cat": 0.50, "rodent": 0.20}
+        self.thresholds = thresholds or {"cat": 0.50, "rodent": 0.15}
         self.spatial_validation_enabled = spatial_validation_enabled
         self.box_expansion = box_expansion
 
@@ -164,6 +166,7 @@ class PreyDetector:
         self.prey_window_seconds = prey_window_seconds
         self.prey_score_threshold = prey_score_threshold
         self.prey_min_detection_score = prey_min_detection_score
+        self.prey_min_detection_count = prey_min_detection_count
         self.reset_on_cat_lost_seconds = reset_on_cat_lost_seconds
 
         # Legacy config (for frame_count mode)
@@ -207,6 +210,7 @@ class PreyDetector:
             f"PreyDetector initialized: mode={prey_confirmation_mode}, "
             f"thresholds={thresholds}, window={prey_window_seconds}s, "
             f"score_threshold={prey_score_threshold}, "
+            f"min_score={prey_min_detection_score}, min_count={prey_min_detection_count}, "
             f"spatial={spatial_validation_enabled}, expansion={box_expansion}"
         )
 
@@ -427,7 +431,7 @@ class PreyDetector:
                         logger.debug(
                             f"Prey score: +{prey.confidence:.2f}, "
                             f"accumulated={accumulated:.2f}/{self.prey_score_threshold}, "
-                            f"count={detection_count}"
+                            f"count={detection_count}/{self.prey_min_detection_count}"
                         )
 
                         # Transition to VERIFYING if we have any score
@@ -438,8 +442,9 @@ class PreyDetector:
                                 [(cb, (DetectionState.VERIFYING,)) for cb in self._on_state_change_callbacks]
                             )
 
-                        # Check if threshold reached
-                        if accumulated >= self.prey_score_threshold:
+                        # Check if both thresholds reached (score AND count)
+                        if (accumulated >= self.prey_score_threshold
+                                and detection_count >= self.prey_min_detection_count):
                             if self._state != DetectionState.CONFIRMED:
                                 event = self._create_confirmation_event(
                                     frame, accumulated, detection_count
@@ -566,7 +571,7 @@ class PreyDetector:
 
         logger.warning(
             f"PREY CONFIRMED! score={accumulated_score:.2f}/{self.prey_score_threshold}, "
-            f"detections={detection_count} in {self.prey_window_seconds}s window, "
+            f"count={detection_count}/{self.prey_min_detection_count} in {self.prey_window_seconds}s window, "
             f"prey={self._last_match.prey.class_name} "
             f"({self._last_match.prey.confidence:.2f})"
         )
@@ -669,6 +674,7 @@ class PreyDetector:
             "accumulated_score": self.accumulated_score,
             "score_threshold": self.prey_score_threshold,
             "detection_count_in_window": self.detection_count_in_window,
+            "min_detection_count": self.prey_min_detection_count,
             "window_seconds": self.prey_window_seconds,
             # Legacy status
             "window_fill": self.window_fill,
@@ -717,6 +723,7 @@ def _create_default_detector() -> PreyDetector:
             prey_window_seconds=inference_config.prey_window_seconds,
             prey_score_threshold=inference_config.prey_score_threshold,
             prey_min_detection_score=inference_config.prey_min_detection_score,
+            prey_min_detection_count=inference_config.prey_min_detection_count,
             reset_on_cat_lost_seconds=inference_config.reset_on_cat_lost_seconds,
             # Legacy params
             window_size=inference_config.window_size,

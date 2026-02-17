@@ -39,9 +39,10 @@
             "1": "rodent"
         },
         "reg_max": 8,
+        "engine_confidence_threshold": 0.10,
         "thresholds": {
             "cat": 0.60,
-            "rodent": 0.25
+            "rodent": 0.15
         },
         "spatial_validation": {
             "enabled": true,
@@ -50,9 +51,10 @@
         "prey_confirmation": {
             "_comment": "Time-based score accumulation for rodent confirmation",
             "mode": "score_accumulation",
-            "window_seconds": 3.0,
+            "window_seconds": 5.0,
             "score_threshold": 0.9,
             "min_detection_score": 0.20,
+            "min_detection_count": 3,
             "reset_on_cat_lost_seconds": 5.0
         },
         "temporal_smoothing": {

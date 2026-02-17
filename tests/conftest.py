@@ -117,12 +117,13 @@ def prey_detector_score_accumulation(mock_engine):
     """Create a PreyDetector with score accumulation mode (v3 default)."""
     return PreyDetector(
         engine=mock_engine,
-        thresholds={"cat": 0.50, "rodent": 0.20},
+        thresholds={"cat": 0.50, "rodent": 0.15},
         prey_confirmation_mode="score_accumulation",
-        prey_window_seconds=3.0,
+        prey_window_seconds=5.0,
         prey_score_threshold=0.9,
         prey_min_detection_score=0.20,
-        reset_on_cat_lost_seconds=1.5,
+        prey_min_detection_count=3,
+        reset_on_cat_lost_seconds=5.0,
         spatial_validation_enabled=True,
         box_expansion=0.25,
     )

@@ -145,10 +145,17 @@ class InferenceConfig(BaseSettings):
         description="DFL reg_max (number of bins per coordinate). v3 uses 8 for better INT8 quantization.",
     )
 
+    # Engine-level confidence threshold (coarse filter for performance)
+    engine_confidence_threshold: float = Field(
+        default=_json_config.get("inference", {}).get("engine_confidence_threshold", 0.10),
+        description="Engine-level threshold for YOLO postprocessing. Low value (0.10) to let "
+        "weak detections through to the score accumulation system.",
+    )
+
     # Per-class confidence thresholds
     thresholds: dict[str, float] = Field(
         default=_json_config.get("inference", {}).get(
-            "thresholds", {"cat": 0.60, "rodent": 0.25}
+            "thresholds", {"cat": 0.60, "rodent": 0.15}
         ),
         description="Per-class confidence thresholds",
     )
@@ -176,7 +183,7 @@ class InferenceConfig(BaseSettings):
     )
     prey_window_seconds: float = Field(
         default=_json_config.get("inference", {}).get("prey_confirmation", {}).get(
-            "window_seconds", 3.0
+            "window_seconds", 5.0
         ),
         description="Time window in seconds for prey score accumulation",
     )
@@ -192,9 +199,16 @@ class InferenceConfig(BaseSettings):
         ),
         description="Minimum detection score to count towards accumulation",
     )
+    prey_min_detection_count: int = Field(
+        default=_json_config.get("inference", {}).get("prey_confirmation", {}).get(
+            "min_detection_count", 3
+        ),
+        description="Minimum number of separate frames with prey detected to confirm "
+        "(prevents single high-confidence noise frame from triggering)",
+    )
     reset_on_cat_lost_seconds: float = Field(
         default=_json_config.get("inference", {}).get("prey_confirmation", {}).get(
-            "reset_on_cat_lost_seconds", 1.5
+            "reset_on_cat_lost_seconds", 5.0
         ),
         description="Reset prey monitoring if no cat detected for this duration",
     )
@@ -247,8 +261,8 @@ class InferenceConfig(BaseSettings):
     # Legacy fields for backwards compatibility
     @property
     def confidence_threshold(self) -> float:
-        """Legacy: return rodent threshold as default."""
-        return self.thresholds.get("rodent", 0.45)
+        """Engine-level confidence threshold for YOLO postprocessing."""
+        return self.engine_confidence_threshold
 
     @property
     def consecutive_frames_required(self) -> int:

@@ -388,8 +388,9 @@ class TestScoreAccumulation:
         """Test score accumulation mode is properly configured."""
         detector = prey_detector_score_accumulation
         assert detector.confirmation_mode == "score_accumulation"
-        assert detector.prey_window_seconds == 3.0
+        assert detector.prey_window_seconds == 5.0
         assert detector.prey_score_threshold == 0.9
+        assert detector.prey_min_detection_count == 3
 
     def test_process_frame_updates_state(self, prey_detector_score_accumulation, sample_frame):
         """Test that processing frames updates detector state."""
@@ -442,3 +443,64 @@ class TestScoreAccumulation:
         assert "score_threshold" in status
         assert "accumulated_score" in status
         assert "detection_count_in_window" in status
+        assert "min_detection_count" in status
+        assert status["min_detection_count"] == 3
+
+    def test_confirmation_requires_both_score_and_count(self, prey_detector_score_accumulation):
+        """Test that prey confirmation requires BOTH accumulated score >= threshold
+        AND detection count >= min_detection_count."""
+        import time
+        from mousehunter.inference.prey_detector import PreyScoreEntry
+
+        detector = prey_detector_score_accumulation
+        confirmed_events = []
+
+        def on_confirmed(event):
+            confirmed_events.append(event)
+
+        detector.on_prey_confirmed(on_confirmed)
+
+        # Manually set state to VERIFYING and add a single high-score entry
+        # Score 0.95 >= threshold 0.9, BUT count 1 < min_count 3
+        detector._state = DetectionState.MONITORING
+        cat = Detection(
+            class_id=0, class_name="cat", confidence=0.85,
+            bbox=BoundingBox(x=0.3, y=0.3, width=0.25, height=0.25),
+        )
+        prey = Detection(
+            class_id=1, class_name="rodent", confidence=0.95,
+            bbox=BoundingBox(x=0.45, y=0.40, width=0.08, height=0.06),
+        )
+        match = SpatialMatch(cat=cat, prey=prey, intersection_type="overlap")
+        detector._last_match = match
+        detector._last_cat_time = time.time()
+
+        # Add only 1 entry with score 0.95 (exceeds 0.9 threshold but count < 3)
+        detector._prey_scores = [
+            PreyScoreEntry(timestamp=time.time(), confidence=0.95, detection=prey),
+        ]
+
+        # Create a frame result that has valid prey
+        frame_result = FrameResult(
+            has_cat=True, has_valid_prey=True,
+            cat_detection=cat, prey_detection=prey, match=match,
+            all_detections=[cat, prey],
+        )
+
+        import numpy as np
+        frame = np.zeros((640, 640, 3), dtype=np.uint8)
+        detector._update_state_score_accumulation(frame_result, frame)
+
+        # Should NOT confirm because count (2 now: 1 existing + 1 from frame_result) < 3
+        assert detector.state != DetectionState.CONFIRMED
+        assert len(confirmed_events) == 0
+
+        # Add one more → count becomes 3, score well above 0.9
+        detector._prey_scores.append(
+            PreyScoreEntry(timestamp=time.time(), confidence=0.30, detection=prey),
+        )
+        detector._update_state_score_accumulation(frame_result, frame)
+
+        # NOW it should confirm (count=4 >= 3, score=2.20+ >= 0.9)
+        assert detector.state == DetectionState.CONFIRMED
+        assert len(confirmed_events) == 1
