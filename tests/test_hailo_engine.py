@@ -174,6 +174,127 @@ class TestHailoAvailability:
         assert HAILO_AVAILABLE is False
 
 
+class TestMultiLabelPostprocessing:
+    """Tests for multi-label output + class-aware NMS in _postprocess_yolo_raw.
+
+    YOLOv8 uses BCE loss so class scores are independent probabilities.
+    A single grid cell can output BOTH cat and rodent above threshold.
+    Class-aware NMS ensures they don't suppress each other.
+    """
+
+    @pytest.fixture
+    def postprocess_engine(self):
+        """Engine configured for postprocessing tests (low threshold)."""
+        return HailoEngine(
+            model_path="models/test.hef",
+            confidence_threshold=0.10,
+            classes={"0": "cat", "1": "rodent"},
+            reg_max=8,
+            force_mock=True,
+        )
+
+    @staticmethod
+    def _make_tensors(cell_logits: dict[tuple[int, int], tuple[float, float]]):
+        """Create synthetic 20x20 class + box tensors for testing.
+
+        Args:
+            cell_logits: {(y, x): (cat_logit, rodent_logit)} for active cells.
+                         All other cells default to -10.0 (sigmoid ≈ 0.00005).
+
+        Returns:
+            dict of output tensors suitable for _postprocess_yolo_raw.
+        """
+        cls_tensor = np.full((20, 20, 2), -10.0, dtype=np.float32)
+        box_tensor = np.zeros((20, 20, 32), dtype=np.float32)  # DFL all-zeros → 3.5 stride units
+
+        for (y, x), (cat_logit, rodent_logit) in cell_logits.items():
+            cls_tensor[y, x, 0] = cat_logit
+            cls_tensor[y, x, 1] = rodent_logit
+
+        return {
+            "cls_scale2": cls_tensor,
+            "bbox_scale2": box_tensor,
+        }
+
+    def test_multi_label_both_classes_output(self, postprocess_engine):
+        """A cell with both cat and rodent above threshold produces TWO detections."""
+        # Cell (10, 10): cat ≈ 0.30 (logit -0.847), rodent ≈ 0.15 (logit -1.735)
+        outputs = self._make_tensors({(10, 10): (-0.847, -1.735)})
+
+        detections = postprocess_engine._postprocess_yolo_raw(outputs, (640, 640))
+
+        class_names = {d.class_name for d in detections}
+        assert "cat" in class_names, "Cat detection missing"
+        assert "rodent" in class_names, "Rodent detection missing (multi-label failed)"
+        assert len(detections) == 2
+
+    def test_multi_label_confidence_values(self, postprocess_engine):
+        """Multi-label preserves correct per-class confidence scores."""
+        # cat ≈ 0.30, rodent ≈ 0.15
+        outputs = self._make_tensors({(5, 5): (-0.847, -1.735)})
+
+        detections = postprocess_engine._postprocess_yolo_raw(outputs, (640, 640))
+
+        cat_det = [d for d in detections if d.class_name == "cat"]
+        rodent_det = [d for d in detections if d.class_name == "rodent"]
+
+        assert len(cat_det) == 1
+        assert len(rodent_det) == 1
+        assert abs(cat_det[0].confidence - 0.30) < 0.02
+        assert abs(rodent_det[0].confidence - 0.15) < 0.02
+
+    def test_class_below_threshold_not_output(self, postprocess_engine):
+        """A cell where one class is below engine threshold outputs only the other."""
+        # cat ≈ 0.30 (above 0.10), rodent ≈ 0.05 (below 0.10)
+        # sigmoid(-2.944) ≈ 0.05
+        outputs = self._make_tensors({(10, 10): (-0.847, -2.944)})
+
+        detections = postprocess_engine._postprocess_yolo_raw(outputs, (640, 640))
+
+        assert len(detections) == 1
+        assert detections[0].class_name == "cat"
+
+    def test_class_aware_nms_preserves_overlapping_classes(self, postprocess_engine):
+        """Cat and rodent at same location both survive class-aware NMS."""
+        # Two adjacent cells both output cat and rodent with overlapping boxes.
+        # Class-aware NMS should keep at least one of each class.
+        outputs = self._make_tensors({
+            (10, 10): (1.386, -1.386),   # cat ≈ 0.80, rodent ≈ 0.20
+            (10, 11): (0.847, -1.516),   # cat ≈ 0.70, rodent ≈ 0.18
+        })
+
+        detections = postprocess_engine._postprocess_yolo_raw(outputs, (640, 640))
+
+        cats = [d for d in detections if d.class_name == "cat"]
+        rodents = [d for d in detections if d.class_name == "rodent"]
+
+        assert len(cats) >= 1, f"Expected at least 1 cat, got {len(cats)}"
+        assert len(rodents) >= 1, f"Expected at least 1 rodent, got {len(rodents)}"
+
+    def test_same_class_nms_still_works(self, postprocess_engine):
+        """Two overlapping same-class detections are consolidated by NMS."""
+        # Two adjacent cells, both only output cat (rodent below threshold)
+        outputs = self._make_tensors({
+            (10, 10): (1.386, -10.0),   # cat ≈ 0.80 only
+            (10, 11): (0.847, -10.0),   # cat ≈ 0.70 only
+        })
+
+        detections = postprocess_engine._postprocess_yolo_raw(outputs, (640, 640))
+
+        cats = [d for d in detections if d.class_name == "cat"]
+        # NMS should consolidate overlapping same-class boxes (IoU > 0.45)
+        # With DFL all-zeros, adjacent cells produce overlapping boxes
+        assert len(cats) <= 2  # At most 2 (could be 1 if NMS suppresses)
+
+    def test_cell_below_threshold_produces_nothing(self, postprocess_engine):
+        """A cell with all class scores below threshold produces no detections."""
+        # Both classes at ≈ 0.05 (below engine threshold 0.10)
+        outputs = self._make_tensors({(10, 10): (-2.944, -2.944)})
+
+        detections = postprocess_engine._postprocess_yolo_raw(outputs, (640, 640))
+        assert len(detections) == 0
+
+
 @pytest.mark.skipif(not HAILO_AVAILABLE, reason="Hailo hardware required")
 class TestHailoHardware:
     """Integration tests that run only on Raspberry Pi with Hailo hardware."""

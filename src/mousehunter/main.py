@@ -311,6 +311,7 @@ class MouseHunterController:
                 prey_window_seconds=inference_config.prey_window_seconds,
                 prey_score_threshold=inference_config.prey_score_threshold,
                 prey_min_detection_score=inference_config.prey_min_detection_score,
+                prey_min_detection_count=inference_config.prey_min_detection_count,
                 reset_on_cat_lost_seconds=inference_config.reset_on_cat_lost_seconds,
                 # Legacy params
                 window_size=inference_config.window_size,

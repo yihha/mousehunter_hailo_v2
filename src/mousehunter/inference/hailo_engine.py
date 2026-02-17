@@ -525,7 +525,9 @@ class HailoEngine:
                 logger.debug(f"Processing scale {scale}: grid={h}x{w}, stride={stride}, "
                             f"has_box_tensor={box_tensor is not None}")
 
-            # For each cell, get best class
+            # For each cell, output all classes above threshold (multi-label)
+            # YOLOv8 uses BCE loss so class scores are independent probabilities;
+            # a cell can have both cat and rodent active simultaneously.
             for y in range(h):
                 for x in range(w):
                     class_scores = scores[y, x]
@@ -533,8 +535,6 @@ class HailoEngine:
 
                     if max_score < self.confidence_threshold:
                         continue
-
-                    class_id = int(np.argmax(class_scores))
 
                     # Grid cell center in pixels
                     cx_pixels = (x + 0.5) * stride
@@ -603,29 +603,45 @@ class HailoEngine:
 
                     # Filter invalid boxes
                     if w_norm > 0.01 and h_norm > 0.01 and w_norm < 0.95 and h_norm < 0.95:
-                        all_boxes.append([x1_norm, y1_norm, w_norm, h_norm])
-                        all_scores.append(float(max_score))
-                        all_class_ids.append(class_id)
+                        # Multi-label: output ALL classes above threshold per cell.
+                        # This preserves weak rodent signals at cells dominated by cat.
+                        for class_id in range(num_classes):
+                            score = float(class_scores[class_id])
+                            if score >= self.confidence_threshold:
+                                all_boxes.append([x1_norm, y1_norm, w_norm, h_norm])
+                                all_scores.append(score)
+                                all_class_ids.append(class_id)
 
         if self._frame_count < 3:
-            logger.debug(f"Pre-NMS detections: {len(all_boxes)}")
+            logger.debug(f"Pre-NMS detections: {len(all_boxes)} (multi-label, {num_classes} classes)")
 
-        # Apply NMS
+        # Class-aware NMS: run per class independently.
+        # Different classes don't suppress each other (standard YOLOv8 behavior).
+        # This allows cat and rodent detections to coexist at the same location
+        # (critical for prey-in-mouth where boxes overlap).
         if all_boxes:
-            keep_indices = self._nms_numpy(
-                np.array(all_boxes),
-                np.array(all_scores),
-                self.nms_iou_threshold
-            )
+            boxes_arr = np.array(all_boxes)
+            scores_arr = np.array(all_scores)
 
-            for idx in keep_indices:
-                class_id = all_class_ids[idx]
-                class_name = self.classes.get(str(class_id), f"class_{class_id}")
+            final_indices = []
+            for cls_id in set(all_class_ids):
+                cls_indices = [i for i, c in enumerate(all_class_ids) if c == cls_id]
+                keep = self._nms_numpy(
+                    boxes_arr[cls_indices],
+                    scores_arr[cls_indices],
+                    self.nms_iou_threshold,
+                )
+                for k in keep:
+                    final_indices.append(cls_indices[k])
+
+            for idx in final_indices:
+                det_class_id = all_class_ids[idx]
+                class_name = self.classes.get(str(det_class_id), f"class_{det_class_id}")
                 box = all_boxes[idx]
 
                 detections.append(
                     Detection(
-                        class_id=class_id,
+                        class_id=det_class_id,
                         class_name=class_name,
                         confidence=all_scores[idx],
                         bbox=BoundingBox(
