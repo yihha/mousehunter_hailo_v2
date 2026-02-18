@@ -292,11 +292,33 @@ class PreyDetector:
                 zoom_frame = zoom_frame_provider(frame_result.cat_detection)
                 if zoom_frame is not None:
                     zoom_result = self.engine.infer(zoom_frame)
-                    # Find prey in zoomed crop — skip spatial validation since
-                    # the entire crop is the cat region by construction
-                    for prey_class in self.PREY_CLASSES:
-                        prey = self._get_best_detection(zoom_result.detections, prey_class)
-                        if prey is not None:
+
+                    # Require cat confirmation in zoom frame — if zooming into
+                    # the supposed cat region doesn't show a cat, the original
+                    # detection was likely a false positive (e.g. human legs)
+                    zoom_cat = self._get_best_detection(zoom_result.detections, "cat")
+                    if zoom_cat is None:
+                        logger.debug(
+                            "Zoom: no cat confirmed in zoomed crop, "
+                            "skipping prey search (likely false positive)"
+                        )
+                    else:
+                        # Find prey in zoomed crop with spatial validation
+                        for prey_class in self.PREY_CLASSES:
+                            prey = self._get_best_detection(zoom_result.detections, prey_class)
+                            if prey is None:
+                                continue
+
+                            # Apply spatial validation within zoom frame
+                            if self.spatial_validation_enabled:
+                                zoom_match = self._check_spatial_match(zoom_cat, prey)
+                                if zoom_match is None:
+                                    logger.debug(
+                                        f"Zoom: {prey.class_name} ({prey.confidence:.2f}) "
+                                        f"not spatially near cat in zoom crop, skipping"
+                                    )
+                                    continue
+
                             frame_result.has_valid_prey = True
                             frame_result.prey_detection = prey
                             frame_result.match = SpatialMatch(
@@ -306,7 +328,8 @@ class PreyDetector:
                             )
                             logger.info(
                                 f"Zoom detection: {prey.class_name} ({prey.confidence:.2f}) "
-                                f"found in zoomed crop around cat"
+                                f"found in zoomed crop around cat "
+                                f"(zoom cat: {zoom_cat.confidence:.2f})"
                             )
                             break
             except Exception as e:
