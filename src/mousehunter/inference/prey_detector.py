@@ -157,7 +157,7 @@ class PreyDetector:
             window_size: Rolling window size (legacy frame_count mode)
             trigger_count: Positive detections required (legacy frame_count mode)
         """
-        self.thresholds = thresholds or {"cat": 0.50, "rodent": 0.15}
+        self.thresholds = thresholds or {"cat": 0.55, "rodent": 0.15}
         self.spatial_validation_enabled = spatial_validation_enabled
         self.box_expansion = box_expansion
 

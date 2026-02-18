@@ -155,7 +155,7 @@ class InferenceConfig(BaseSettings):
     # Per-class confidence thresholds
     thresholds: dict[str, float] = Field(
         default=_json_config.get("inference", {}).get(
-            "thresholds", {"cat": 0.50, "rodent": 0.15}
+            "thresholds", {"cat": 0.55, "rodent": 0.15}
         ),
         description="Per-class confidence thresholds",
     )
