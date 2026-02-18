@@ -298,7 +298,7 @@ class PreyDetector:
                     # detection was likely a false positive (e.g. human legs)
                     zoom_cat = self._get_best_detection(zoom_result.detections, "cat")
                     if zoom_cat is None:
-                        logger.debug(
+                        logger.info(
                             "Zoom: no cat confirmed in zoomed crop, "
                             "skipping prey search (likely false positive)"
                         )
@@ -313,7 +313,7 @@ class PreyDetector:
                             if self.spatial_validation_enabled:
                                 zoom_match = self._check_spatial_match(zoom_cat, prey)
                                 if zoom_match is None:
-                                    logger.debug(
+                                    logger.info(
                                         f"Zoom: {prey.class_name} ({prey.confidence:.2f}) "
                                         f"not spatially near cat in zoom crop, skipping"
                                     )

@@ -21,7 +21,7 @@ YOLOv8's smallest detection head (P3, stride-8) produces an 80x80 feature map fr
 ### Solution
 **Two-stage cascaded detection**: When a cat is detected on the 640x640 lores stream but no prey is found, capture from the 1920x1080 main stream, crop the region around the cat, and resize to 640x640 for a second inference pass. This provides ~3-5x effective zoom, making a 10px rodent into 30-50px — well within detection range.
 
-Also lower the cat threshold from 0.60 to 0.50. The live system had cat at exactly 0.60; any confidence jitter drops it below threshold and shortens the detection window.
+Also lower the cat threshold from 0.60 to 0.55. The live system had cat at exactly 0.60; any confidence jitter drops it below threshold and shortens the detection window. (Initially lowered to 0.50, raised to 0.55 after live false positive testing.)
 
 ---
 
@@ -39,7 +39,9 @@ Camera lores (640x640 RGB) ──→ Stage 1: Hailo inference (~10ms)
                                    │     ├─ Crop cat region (with 50% padding, squared)
                                    │     ├─ Resize crop to 640x640
                                    │     ├─ Hailo inference on zoomed crop (~10ms)
-                                   │     └─ Any prey found → Score accumulation (no spatial check needed)
+                                   │     ├─ Cat confirmed in zoom? (filters false positives)
+                                   │     ├─ Prey spatially near cat in zoom? (filters noise)
+                                   │     └─ Both pass → Score accumulation
                                    │
                                    └─ No cat → Skip (idle)
 ```
@@ -77,7 +79,7 @@ resized = cv2.resize(cropped, (640, 640))
 ### config/config.json — Threshold + zoom config
 ```json
 "thresholds": {
-    "cat": 0.50,        // was 0.60
+    "cat": 0.55,        // was 0.60 (initially 0.50, raised after false positive testing)
     "rodent": 0.15
 },
 "zoom_detection": {
@@ -92,7 +94,7 @@ resized = cv2.resize(cropped, (640, 640))
 zoom_detection_enabled: bool    # default from config.json (False if missing)
 zoom_crop_padding: float        # default 0.5
 ```
-Also updated hardcoded cat threshold fallback from 0.60 to 0.50 for consistency.
+Also updated hardcoded cat threshold fallback from 0.60 to 0.55 for consistency.
 
 ### camera_service.py — `capture_main_frame_rgb()`
 New method that captures the main stream (YUV420) and converts to RGB:
@@ -119,7 +121,8 @@ After Stage 1, if cat found but no prey:
 - Calls `zoom_frame_provider(cat_detection)` to get 640x640 zoomed crop
 - Runs `engine.infer(zoom_frame)` for Stage 2
 - Searches zoom results for prey using `_get_best_detection()` (applies per-class thresholds)
-- **No spatial validation** — the crop IS the cat region by construction
+- **Cat confirmation required** — zoom crop must also detect a cat (filters false positives)
+- **Spatial validation applied** within zoom frame (prey must be near cat in crop)
 - Creates `SpatialMatch(intersection_type="zoom")` for logging/status
 - Zoom prey feeds into score accumulation normally
 
@@ -172,7 +175,7 @@ If the cat is near a frame edge, clamping produces a non-square crop that gets r
 | Threshold | Value | Purpose |
 |-----------|-------|---------|
 | Engine confidence | 0.10 | Coarse noise filter in YOLO postprocess |
-| Cat per-class | **0.50** | Minimum to consider a cat detection valid (was 0.60) |
+| Cat per-class | **0.55** | Minimum to consider a cat detection valid (was 0.60, then 0.50, settled on 0.55) |
 | Rodent per-class | 0.15 | Lets weak prey-in-mouth detections through |
 | min_detection_score | 0.20 | Real per-frame gate for score accumulation |
 | Score threshold | 0.9 | Accumulated confidence needed to confirm |
@@ -186,8 +189,8 @@ If the cat is near a frame edge, clamping produces a non-square crop that gets r
 
 | File | Change |
 |------|--------|
-| `config/config.json` | Cat threshold 0.60→0.50, added `zoom_detection` section |
-| `src/mousehunter/config.py` | Added `zoom_detection_enabled` and `zoom_crop_padding` fields, updated cat threshold fallback |
+| `config/config.json` | Cat threshold 0.60→0.55, added `zoom_detection` section |
+| `src/mousehunter/config.py` | Added `zoom_detection_enabled` and `zoom_crop_padding` fields, updated cat threshold fallback to 0.55 |
 | `src/mousehunter/camera/camera_service.py` | Added `capture_main_frame_rgb()` method (YUV420→RGB conversion) |
 | `src/mousehunter/inference/prey_detector.py` | Added `zoom_frame_provider` parameter to `process_frame()`, Stage 2 zoom logic |
 | `src/mousehunter/main.py` | Added `_get_zoom_frame()` method, modified `_detection_loop()` to wire up zoom provider |
@@ -211,5 +214,83 @@ Expected log output:
 
 ---
 
-*Commit: `744fabe` — Pushed to origin/main*
+## 9. Post-Deployment: False Positive Fix (Cat Confirmation in Zoom)
+
+### Problem Discovered
+Live testing revealed that the zoom feature **amplified false positives**. When a human walked in front of the camera:
+1. Stage 1: Human misclassified as cat at 0.60 confidence (model has no background class)
+2. Stage 2: Zoom cropped the human body from 1080p → resized to 640x640
+3. Model found "rodent" at 0.40, 0.35, 0.50 in the zoomed human body
+4. Score accumulated: 1.25 > 0.9 threshold, 3 frames → **full LOCKDOWN on a human**
+
+Before zoom, this false cat detection was harmless (no prey found → MONITORING → timeout → IDLE). The zoom feature turned a benign false positive into a destructive one.
+
+### Cat Threshold Adjustment
+Raised cat threshold from 0.50 → 0.55. The original 0.50 was too aggressive — humans triggered at 0.50. However, 0.55 alone wasn't enough: the next test still triggered with human at 0.60 confidence.
+
+### Root Cause
+The model (2 classes: cat, rodent, no background class) is forced to classify all detected objects as either cat or rodent. Humans at distance resemble cats to the model. This is a **training data problem** — the model needs background/negative images (humans, furniture, empty scenes) with empty annotation files to learn to suppress detections on non-target content.
+
+### Fix: Cat Confirmation + Spatial Validation in Zoom
+Two safeguards added to `prey_detector.py` Stage 2 zoom logic:
+
+1. **Cat confirmation**: After running inference on the zoomed crop, require a cat detection above threshold in the zoom frame. If the zoomed "cat" region doesn't show a cat, the original detection was likely a false positive. This works because:
+   - A real cat zoomed in is **more** detectable (fills more of the frame, higher confidence)
+   - A human zoomed in is **less** cat-like (skin, clothing, proportions visible)
+
+2. **Spatial validation**: Apply the same spatial intersection check (expanded cat bbox) within the zoom frame. Prey must be near the cat in the crop, filtering random noise detections.
+
+### Updated Detection Pipeline
+```
+Stage 2: Zoom detection (revised)
+  ├─ Capture main stream → crop cat region → resize 640x640
+  ├─ Hailo inference on zoomed crop
+  ├─ Cat detected in zoom? (NEW CHECK)
+  │     ├─ NO → "likely false positive" → skip prey search
+  │     └─ YES → search for prey
+  │           ├─ Prey spatially near cat in zoom? (NEW CHECK)
+  │           │     ├─ NO → skip
+  │           │     └─ YES → score accumulation
+  │           └─ No prey → skip
+```
+
+### Live Test Result
+After deploying the fix:
+- Human walks in front of camera → Stage 1: cat detected (MONITORING)
+- Stage 2: zoom crops human → **no cat in zoom** → prey search skipped
+- No score accumulation, no lockdown
+- Cat lost after 5.1s → clean reset to IDLE
+
+### Zoom Log Messages (Changed to INFO Level)
+- `Zoom: no cat confirmed in zoomed crop, skipping prey search (likely false positive)`
+- `Zoom: rodent (0.XX) not spatially near cat in zoom crop, skipping`
+- `Zoom detection: rodent (0.XX) found in zoomed crop around cat (zoom cat: 0.XX)`
+
+### Updated Threshold Summary
+
+| Threshold | Value | Purpose |
+|-----------|-------|---------|
+| Engine confidence | 0.10 | Coarse noise filter in YOLO postprocess |
+| Cat per-class | **0.55** | Minimum to consider a cat detection valid (was 0.50→0.55) |
+| Rodent per-class | 0.15 | Lets weak prey-in-mouth detections through |
+| min_detection_score | 0.20 | Real per-frame gate for score accumulation |
+| Score threshold | 0.9 | Accumulated confidence needed to confirm |
+| min_detection_count | 3 | Minimum separate frames with prey |
+| Window | 5.0s | Time window for accumulation |
+| Cat lost reset | 5.0s | Reset if no cat for this long |
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `config/config.json` | Cat threshold 0.50→0.55 |
+| `src/mousehunter/config.py` | Updated cat threshold fallback to 0.55 |
+| `src/mousehunter/inference/prey_detector.py` | Cat confirmation + spatial validation in zoom, zoom rejection logs changed to INFO level |
+
+### Industry Best Practice Note
+The false positive issue is a common problem for custom object detectors without a background class. Standard fix: add 1-10% background/negative images (humans, empty scenes) with empty annotation files to the training set. The training data capture system (cat_only, near_miss callbacks) already collects these images for future retraining.
+
+---
+
+*Commits: `744fabe` (zoom feature), `944f24d` (update log), `5d0e27f` (cat threshold 0.55), `d268988` (cat confirmation safeguard)*
 *Log created: February 18, 2026*
