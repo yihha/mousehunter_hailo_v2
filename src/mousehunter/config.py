@@ -155,7 +155,7 @@ class InferenceConfig(BaseSettings):
     # Per-class confidence thresholds
     thresholds: dict[str, float] = Field(
         default=_json_config.get("inference", {}).get(
-            "thresholds", {"cat": 0.60, "rodent": 0.15}
+            "thresholds", {"cat": 0.50, "rodent": 0.15}
         ),
         description="Per-class confidence thresholds",
     )
@@ -211,6 +211,21 @@ class InferenceConfig(BaseSettings):
             "reset_on_cat_lost_seconds", 5.0
         ),
         description="Reset prey monitoring if no cat detected for this duration",
+    )
+
+    # Two-stage zoom detection
+    zoom_detection_enabled: bool = Field(
+        default=_json_config.get("inference", {}).get("zoom_detection", {}).get(
+            "enabled", False
+        ),
+        description="Enable two-stage zoom detection: crop cat region from 1080p main stream "
+        "and re-run inference for better prey detection at distance",
+    )
+    zoom_crop_padding: float = Field(
+        default=_json_config.get("inference", {}).get("zoom_detection", {}).get(
+            "crop_padding", 0.5
+        ),
+        description="Padding factor around cat bbox for zoom crop (0.5 = 50% expansion each side)",
     )
 
     # Legacy temporal smoothing (frame-based rolling window)

@@ -435,13 +435,85 @@ class MouseHunterController:
         self._detection_thread.start()
         logger.info("Detection thread started")
 
+    def _get_zoom_frame(self, cat_detection) -> np.ndarray | None:
+        """
+        Crop the cat region from the 1080p main stream and resize to 640x640.
+
+        Provides ~3-5x effective zoom for detecting small prey in the cat's mouth
+        when the cat is far from the camera.
+
+        Args:
+            cat_detection: Detection with normalized bbox of the cat
+
+        Returns:
+            640x640 RGB numpy array, or None on error
+        """
+        try:
+            import cv2
+
+            main_frame = self._camera.capture_main_frame_rgb()
+            if main_frame is None:
+                return None
+
+            h, w = main_frame.shape[:2]
+            bbox = cat_detection.bbox
+
+            from mousehunter.config import inference_config
+            padding = inference_config.zoom_crop_padding
+
+            # Cat center and size in pixels
+            cx = bbox.center_x * w
+            cy = bbox.center_y * h
+            cat_w_px = bbox.width * w
+            cat_h_px = bbox.height * h
+
+            # Expand with padding
+            crop_w = cat_w_px * (1 + 2 * padding)
+            crop_h = cat_h_px * (1 + 2 * padding)
+
+            # Make square (use max dimension)
+            crop_size = max(crop_w, crop_h)
+
+            # Crop bounds (clamped to image)
+            x1 = int(max(0, cx - crop_size / 2))
+            y1 = int(max(0, cy - crop_size / 2))
+            x2 = int(min(w, cx + crop_size / 2))
+            y2 = int(min(h, cy + crop_size / 2))
+
+            # Ensure minimum crop size
+            if x2 - x1 < 10 or y2 - y1 < 10:
+                return None
+
+            cropped = main_frame[y1:y2, x1:x2]
+            resized = cv2.resize(cropped, (640, 640), interpolation=cv2.INTER_LINEAR)
+            return resized
+
+        except Exception as e:
+            logger.error(f"Zoom frame capture error: {e}")
+            return None
+
     def _detection_loop(self) -> None:
         """
         Main detection loop (runs in background thread).
 
         Captures frames and runs inference continuously.
+        When zoom detection is enabled, provides a zoom_frame_provider callback
+        that crops the cat region from the 1080p main stream for a second
+        inference pass (two-stage cascaded detection).
         """
         logger.info("Detection loop starting")
+
+        from mousehunter.config import inference_config
+        zoom_enabled = inference_config.zoom_detection_enabled
+
+        # Create zoom provider closure
+        zoom_provider = self._get_zoom_frame if zoom_enabled else None
+
+        if zoom_enabled:
+            logger.info(
+                f"Two-stage zoom detection ENABLED "
+                f"(padding={inference_config.zoom_crop_padding})"
+            )
 
         # Start camera
         self._camera.start()
@@ -455,8 +527,11 @@ class MouseHunterController:
                 if frame is None:
                     continue
 
-                # Process through prey detector
-                result = self._detector.process_frame(frame, timestamp)
+                # Process through prey detector (with optional zoom)
+                result = self._detector.process_frame(
+                    frame, timestamp,
+                    zoom_frame_provider=zoom_provider,
+                )
                 frame_count += 1
 
                 # Log periodically

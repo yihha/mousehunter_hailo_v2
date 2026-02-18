@@ -249,21 +249,33 @@ class PreyDetector:
         return len(self._detection_window)
 
     def process_frame(
-        self, frame: np.ndarray, timestamp: datetime | None = None
+        self,
+        frame: np.ndarray,
+        timestamp: datetime | None = None,
+        zoom_frame_provider: Callable[[Detection], np.ndarray | None] | None = None,
     ) -> DetectionFrame:
         """
         Process a single frame for prey detection.
 
+        Implements two-stage detection:
+        1. Stage 1: Run inference on the lores (640x640) frame
+        2. Stage 2 (zoom): If cat found but no prey, crop from high-res main
+           stream around the cat, resize to 640x640, and re-run inference.
+           Any prey found in the zoomed crop is valid (no spatial check needed
+           since the crop IS the cat region).
+
         Args:
-            frame: Input frame (RGB)
+            frame: Input frame (RGB, typically 640x640 lores)
             timestamp: Frame timestamp
+            zoom_frame_provider: Optional callback that takes a cat Detection
+                and returns a 640x640 RGB crop from the main stream, or None.
 
         Returns:
             DetectionFrame with inference results
         """
         timestamp = timestamp or datetime.now()
 
-        # Run inference
+        # Stage 1: Run inference on lores frame
         result = self.engine.infer(frame)
 
         # Add to history
@@ -271,6 +283,34 @@ class PreyDetector:
 
         # Evaluate frame with spatial logic
         frame_result = self._evaluate_frame(result)
+
+        # Stage 2: If cat found but no prey, try zoom detection
+        if (frame_result.has_cat and not frame_result.has_valid_prey
+                and zoom_frame_provider is not None
+                and frame_result.cat_detection is not None):
+            try:
+                zoom_frame = zoom_frame_provider(frame_result.cat_detection)
+                if zoom_frame is not None:
+                    zoom_result = self.engine.infer(zoom_frame)
+                    # Find prey in zoomed crop — skip spatial validation since
+                    # the entire crop is the cat region by construction
+                    for prey_class in self.PREY_CLASSES:
+                        prey = self._get_best_detection(zoom_result.detections, prey_class)
+                        if prey is not None:
+                            frame_result.has_valid_prey = True
+                            frame_result.prey_detection = prey
+                            frame_result.match = SpatialMatch(
+                                cat=frame_result.cat_detection,
+                                prey=prey,
+                                intersection_type="zoom",
+                            )
+                            logger.info(
+                                f"Zoom detection: {prey.class_name} ({prey.confidence:.2f}) "
+                                f"found in zoomed crop around cat"
+                            )
+                            break
+            except Exception as e:
+                logger.error(f"Zoom detection error: {e}")
 
         # Update state based on confirmation mode
         if self.confirmation_mode == "score_accumulation":

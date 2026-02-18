@@ -41,8 +41,13 @@
         "reg_max": 8,
         "engine_confidence_threshold": 0.10,
         "thresholds": {
-            "cat": 0.60,
+            "cat": 0.50,
             "rodent": 0.15
+        },
+        "zoom_detection": {
+            "enabled": true,
+            "crop_padding": 0.5,
+            "_comment": "Two-stage: crop from 1080p main stream when cat detected without prey"
         },
         "spatial_validation": {
             "enabled": true,

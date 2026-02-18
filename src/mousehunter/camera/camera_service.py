@@ -334,6 +334,34 @@ class CameraService:
             logger.error(f"Failed to capture frame: {e}")
             return None, None
 
+    def capture_main_frame_rgb(self) -> np.ndarray | None:
+        """
+        Capture a frame from the main stream and convert YUV420 → RGB.
+
+        Used by the two-stage zoom detection pipeline to get full-resolution
+        (1920x1080) RGB data for cropping around detected cats.
+
+        Returns:
+            RGB numpy array (1080, 1920, 3) or None on error.
+        """
+        if not self._started:
+            return None
+        try:
+            # picamera2 capture_array("main") returns YUV420: shape (h*3//2, w)
+            yuv = self._camera.capture_array("main")
+
+            if not PICAMERA_AVAILABLE:
+                # Mock mode: already returns YUV420-shaped array, convert to RGB
+                h, w = self.main_resolution[1], self.main_resolution[0]
+                return np.random.randint(0, 255, (h, w, 3), dtype=np.uint8)
+
+            import cv2
+            rgb = cv2.cvtColor(yuv, cv2.COLOR_YUV2RGB_I420)
+            return rgb
+        except Exception as e:
+            logger.error(f"Failed to capture main frame RGB: {e}")
+            return None
+
     def capture_snapshot_bytes(self, quality: int = 85) -> bytes | None:
         """Capture current frame as JPEG bytes (from lores RGB stream)."""
         if not self._started:
