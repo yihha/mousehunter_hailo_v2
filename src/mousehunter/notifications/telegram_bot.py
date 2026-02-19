@@ -81,6 +81,8 @@ class MockTelegramApp:
             logger.info(f"[MOCK] Photo to {chat_id}: {caption}")
 
     class updater:
+        running = True
+
         @staticmethod
         async def start_polling(**kwargs):
             logger.info("[MOCK] Polling started")
@@ -123,6 +125,7 @@ class TelegramBot:
 
         self._app: "Application" = None
         self._started = False
+        self._polling_restart_count = 0
 
         # External component references (set by main controller)
         self._jammer = None
@@ -173,6 +176,7 @@ class TelegramBot:
             await self._app.updater.start_polling(
                 allowed_updates=Update.ALL_TYPES,
                 drop_pending_updates=True,
+                error_callback=self._polling_error_callback,
             )
 
         self._started = True
@@ -191,6 +195,43 @@ class TelegramBot:
         await self._app.stop()
         self._started = False
         logger.info("Telegram bot stopped")
+
+    def _polling_error_callback(self, exc: Exception) -> None:
+        """Called by PTB when getUpdates fails (sync callback)."""
+        logger.warning(f"Telegram polling error (getUpdates failed): {exc}")
+
+    async def check_polling_health(self) -> bool:
+        """
+        Check if polling is alive and restart if dead.
+
+        Returns True if a restart was needed.
+        """
+        if not self._started or not self.enabled or not TELEGRAM_AVAILABLE:
+            return False
+
+        if not self._app or not self._app.updater:
+            return False
+
+        if self._app.updater.running:
+            return False
+
+        # Polling is dead — restart it
+        self._polling_restart_count += 1
+        logger.warning(
+            f"Telegram polling found dead! Restarting... "
+            f"(restart #{self._polling_restart_count})"
+        )
+        try:
+            await self._app.updater.start_polling(
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=False,  # Don't drop — we may have missed commands
+                error_callback=self._polling_error_callback,
+            )
+            logger.warning("Telegram polling restarted successfully")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to restart Telegram polling: {e}")
+            return False
 
     def _register_handlers(self) -> None:
         """Register command handlers."""
@@ -286,44 +327,56 @@ class TelegramBot:
 
     async def _cmd_lock(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /lock command."""
-        if not self._jammer:
-            await update.message.reply_text("Jammer not available")
-            return
+        try:
+            if not self._jammer:
+                await update.message.reply_text("Jammer not available")
+                return
 
-        if self._jammer.activate():
-            remaining = self._jammer.time_remaining
-            await update.message.reply_text(
-                f"Cat flap LOCKED\n"
-                f"Duration: {remaining:.0f} seconds"
-            )
-        else:
-            remaining = self._jammer.time_remaining
-            await update.message.reply_text(
-                f"Cat flap already locked\n"
-                f"Remaining: {remaining:.0f} seconds"
-            )
+            if self._jammer.activate():
+                remaining = self._jammer.time_remaining
+                await update.message.reply_text(
+                    f"Cat flap LOCKED\n"
+                    f"Duration: {remaining:.0f} seconds"
+                )
+            else:
+                remaining = self._jammer.time_remaining
+                await update.message.reply_text(
+                    f"Cat flap already locked\n"
+                    f"Remaining: {remaining:.0f} seconds"
+                )
+        except Exception as e:
+            logger.error(f"Lock command error: {e}")
+            await update.message.reply_text(f"Error: {e}")
 
     async def _cmd_unlock(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /unlock command."""
-        if not self._jammer:
-            await update.message.reply_text("Jammer not available")
-            return
+        try:
+            if not self._jammer:
+                await update.message.reply_text("Jammer not available")
+                return
 
-        if self._jammer.deactivate("Manual unlock via Telegram"):
-            await update.message.reply_text("Cat flap UNLOCKED")
-        else:
-            await update.message.reply_text("Cat flap was not locked")
+            if self._jammer.deactivate("Manual unlock via Telegram"):
+                await update.message.reply_text("Cat flap UNLOCKED")
+            else:
+                await update.message.reply_text("Cat flap was not locked")
+        except Exception as e:
+            logger.error(f"Unlock command error: {e}")
+            await update.message.reply_text(f"Error: {e}")
 
     async def _cmd_scream(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /scream command."""
-        if not self._audio:
-            await update.message.reply_text("Audio system not available")
-            return
+        try:
+            if not self._audio:
+                await update.message.reply_text("Audio system not available")
+                return
 
-        if self._audio.play():
-            await update.message.reply_text("SCREAM triggered!")
-        else:
-            await update.message.reply_text("Audio failed or already playing")
+            if self._audio.play():
+                await update.message.reply_text("SCREAM triggered!")
+            else:
+                await update.message.reply_text("Audio failed or already playing")
+        except Exception as e:
+            logger.error(f"Scream command error: {e}")
+            await update.message.reply_text(f"Error: {e}")
 
     async def _cmd_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /photo command."""
@@ -350,27 +403,30 @@ class TelegramBot:
 
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle inline button callbacks."""
-        query = update.callback_query
-        await query.answer()
+        try:
+            query = update.callback_query
+            await query.answer()
 
-        action = query.data
+            action = query.data
 
-        if action == "unlock":
-            if self._jammer:
-                self._jammer.deactivate("Telegram button")
-                await query.edit_message_text("Cat flap unlocked!")
-            else:
-                await query.edit_message_text("Jammer not available")
+            if action == "unlock":
+                if self._jammer:
+                    self._jammer.deactivate("Telegram button")
+                    await query.edit_message_text("Cat flap unlocked!")
+                else:
+                    await query.edit_message_text("Jammer not available")
 
-        elif action == "scream":
-            if self._audio:
-                self._audio.play()
-                await query.edit_message_text("SCREAM triggered!")
-            else:
-                await query.edit_message_text("Audio not available")
+            elif action == "scream":
+                if self._audio:
+                    self._audio.play()
+                    await query.edit_message_text("SCREAM triggered!")
+                else:
+                    await query.edit_message_text("Audio not available")
 
-        elif action == "ignore":
-            await query.edit_message_text("Alert ignored")
+            elif action == "ignore":
+                await query.edit_message_text("Alert ignored")
+        except Exception as e:
+            logger.error(f"Callback handler error: {e}")
 
     def _get_action_keyboard(self) -> "InlineKeyboardMarkup":
         """Create inline keyboard for quick actions."""

@@ -77,6 +77,7 @@ class MouseHunterController:
         self._last_prey_event = None  # Most recent prey detection event
         self._evidence_events: dict[str, object] = {}  # evidence_dir -> event for deferred upload
         self._last_cat_notification_time: float = 0  # For cat detection cooldown
+        self._telegram_health_check_counter: int = 0  # Ticks until next health check
 
         # Callbacks
         self._on_state_change_callbacks: list[Callable[[SystemState], None]] = []
@@ -149,6 +150,7 @@ class MouseHunterController:
         # Start Telegram bot if enabled
         if telegram_config.enabled and self._telegram:
             task = asyncio.create_task(self._telegram.start(), name="telegram_bot")
+            task.add_done_callback(self._telegram_task_callback)
             self._background_tasks.append(task)
             logger.info("Telegram bot task started")
 
@@ -678,6 +680,15 @@ class MouseHunterController:
         except Exception as e:
             logger.error(f"Lockdown execution failed: {e}", exc_info=True)
 
+    def _telegram_task_callback(self, task: asyncio.Task) -> None:
+        """Callback to catch Telegram bot startup failures."""
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass  # Normal shutdown
+        except Exception as e:
+            logger.error(f"Telegram bot task failed: {e}", exc_info=True)
+
     def _notification_callback(self, future) -> None:
         """Callback to log notification errors (prevents silent failures)."""
         try:
@@ -924,6 +935,18 @@ class MouseHunterController:
     async def _state_machine_tick(self) -> None:
         """Periodic state machine update."""
         from mousehunter.config import jammer_config
+
+        # Check Telegram polling health every 30 ticks (~30s)
+        self._telegram_health_check_counter += 1
+        if self._telegram_health_check_counter >= 30:
+            self._telegram_health_check_counter = 0
+            if self._telegram:
+                try:
+                    restarted = await self._telegram.check_polling_health()
+                    if restarted:
+                        logger.warning("Telegram polling was dead and has been restarted")
+                except Exception as e:
+                    logger.error(f"Telegram health check error: {e}")
 
         if self._state == SystemState.LOCKDOWN:
             if self._lockdown_start:
