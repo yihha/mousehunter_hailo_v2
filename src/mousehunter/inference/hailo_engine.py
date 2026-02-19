@@ -125,6 +125,7 @@ class HailoEngine:
         self._input_shape: tuple | None = None
         self._frame_count = 0
         self._total_inference_time = 0.0
+        self._consecutive_inference_errors = 0
 
         # Callbacks for detection events
         self._detection_callbacks: list[Callable[[DetectionFrame], None]] = []
@@ -268,8 +269,25 @@ class HailoEngine:
                     logger.debug(f"Output: type={type(raw_output)}")
 
         except Exception as e:
-            logger.error(f"Hailo inference error: {e}", exc_info=True)
+            self._consecutive_inference_errors += 1
+            if self._consecutive_inference_errors <= 3 or self._consecutive_inference_errors % 100 == 0:
+                logger.error(
+                    f"Hailo inference error (consecutive: {self._consecutive_inference_errors}): {e}",
+                    exc_info=(self._consecutive_inference_errors <= 3),
+                )
+            if self._consecutive_inference_errors == 10:
+                logger.warning(
+                    "Hailo inference has failed 10 times consecutively — "
+                    "system is blind (no detections). Check NPU/model health."
+                )
             return []
+
+        # Track recovery from errors
+        if self._consecutive_inference_errors > 0:
+            logger.warning(
+                f"Hailo inference recovered after {self._consecutive_inference_errors} consecutive errors"
+            )
+            self._consecutive_inference_errors = 0
 
         # Post-process outputs
         detections = self._postprocess_yolo(raw_output, frame.shape[:2])

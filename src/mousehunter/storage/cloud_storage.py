@@ -363,8 +363,8 @@ class CloudStorage:
                             meta = json.load(f)
                             prey_type = meta.get("detection", {}).get("prey_type", "unknown")
                             confidence = meta.get("detection", {}).get("prey_confidence", 0.0)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Metadata parse failed for {folder.name}: {e}")
 
                 success = await self.upload_evidence(
                     folder,

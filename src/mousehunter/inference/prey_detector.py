@@ -553,7 +553,7 @@ class PreyDetector:
             try:
                 callback(*args)
             except Exception as e:
-                logger.error(f"Callback error: {e}")
+                logger.error(f"Callback {getattr(callback, '__name__', callback)} error: {e}", exc_info=True)
 
     def _update_state_frame_count(
         self, frame_result: FrameResult, frame: np.ndarray
@@ -607,7 +607,7 @@ class PreyDetector:
             try:
                 callback(*args)
             except Exception as e:
-                logger.error(f"Callback error: {e}")
+                logger.error(f"Callback {getattr(callback, '__name__', callback)} error: {e}", exc_info=True)
 
     def _create_confirmation_event(
         self, frame: np.ndarray, accumulated_score: float, detection_count: int
@@ -696,7 +696,7 @@ class PreyDetector:
             try:
                 callback(*args)
             except Exception as e:
-                logger.error(f"Reset callback error: {e}")
+                logger.error(f"Reset callback {getattr(callback, '__name__', callback)} error: {e}", exc_info=True)
 
     def on_prey_confirmed(self, callback: Callable[[PreyDetectionEvent], None]) -> None:
         """Register callback for when prey is confirmed."""

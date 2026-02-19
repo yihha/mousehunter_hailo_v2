@@ -78,6 +78,9 @@ class MouseHunterController:
         self._evidence_events: dict[str, object] = {}  # evidence_dir -> event for deferred upload
         self._last_cat_notification_time: float = 0  # For cat detection cooldown
         self._telegram_health_check_counter: int = 0  # Ticks until next health check
+        self._heartbeat_counter: int = 0  # Ticks until next heartbeat log
+        self._last_heartbeat_frame_count: int = 0  # Frame count at last heartbeat
+        self._cats_seen_since_heartbeat: int = 0  # Cat detections since last heartbeat
 
         # Callbacks
         self._on_state_change_callbacks: list[Callable[[SystemState], None]] = []
@@ -756,9 +759,11 @@ class MouseHunterController:
         from mousehunter.config import telegram_config
         import time
 
-        # Only notify on MONITORING state (cat just detected)
+        # Only act on MONITORING state (cat just detected)
         if state != DetectionState.MONITORING:
             return
+
+        self._cats_seen_since_heartbeat += 1
 
         # Check if cat notification is enabled
         if not telegram_config.notify_on_cat_detected:
@@ -932,9 +937,64 @@ class MouseHunterController:
             except Exception as e:
                 logger.error(f"Training data periodic capture error: {e}")
 
+    def _log_heartbeat(self) -> None:
+        """Log periodic system health summary at INFO level (~every 5 min)."""
+        try:
+            parts = [f"state={self._state.name}"]
+
+            # Frame throughput
+            if self._detector and self._detector.engine:
+                engine = self._detector.engine
+                current_frames = engine._frame_count
+                frames_since = current_frames - self._last_heartbeat_frame_count
+                self._last_heartbeat_frame_count = current_frames
+                avg_ms = engine.average_inference_time
+                parts.append(f"frames={current_frames} (+{frames_since})")
+                parts.append(f"inference={avg_ms:.1f}ms")
+
+                # Inference error health
+                if engine._consecutive_inference_errors > 0:
+                    parts.append(f"inference_errors={engine._consecutive_inference_errors}")
+
+            # Cat activity
+            parts.append(f"cats={self._cats_seen_since_heartbeat}")
+            self._cats_seen_since_heartbeat = 0
+            parts.append(f"detections={self._detection_count}")
+            parts.append(f"lockdowns={self._lockdown_count}")
+
+            # Jammer
+            if self._jammer:
+                parts.append(f"jammer={'LOCKED' if self._jammer.is_active else 'unlocked'}")
+
+            # Telegram polling
+            if self._telegram:
+                polling = "unknown"
+                if hasattr(self._telegram, '_started') and self._telegram._started:
+                    if (hasattr(self._telegram, '_app') and self._telegram._app
+                            and hasattr(self._telegram._app, 'updater')
+                            and self._telegram._app.updater):
+                        polling = "alive" if self._telegram._app.updater.running else "DEAD"
+                    else:
+                        polling = "no-updater"
+                else:
+                    polling = "not-started"
+                parts.append(f"telegram={polling}")
+                if self._telegram._polling_restart_count > 0:
+                    parts.append(f"poll_restarts={self._telegram._polling_restart_count}")
+
+            logger.info(f"Heartbeat: {', '.join(parts)}")
+        except Exception as e:
+            logger.debug(f"Heartbeat log error: {e}")
+
     async def _state_machine_tick(self) -> None:
         """Periodic state machine update."""
         from mousehunter.config import jammer_config
+
+        # Periodic heartbeat log every 300 ticks (~5 min)
+        self._heartbeat_counter += 1
+        if self._heartbeat_counter >= 300:
+            self._heartbeat_counter = 0
+            self._log_heartbeat()
 
         # Check Telegram polling health every 30 ticks (~30s)
         self._telegram_health_check_counter += 1

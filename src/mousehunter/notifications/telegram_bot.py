@@ -173,11 +173,18 @@ class TelegramBot:
 
         # Start polling
         if TELEGRAM_AVAILABLE:
-            await self._app.updater.start_polling(
-                allowed_updates=Update.ALL_TYPES,
-                drop_pending_updates=True,
-                error_callback=self._polling_error_callback,
-            )
+            try:
+                await self._app.updater.start_polling(
+                    allowed_updates=Update.ALL_TYPES,
+                    drop_pending_updates=True,
+                    error_callback=self._polling_error_callback,
+                )
+            except Exception as e:
+                logger.error(
+                    f"Telegram polling failed to start: {e}. "
+                    "Bot will send notifications but NOT receive commands. "
+                    "Health check will attempt restart in ~30s."
+                )
 
         self._started = True
         logger.info("Telegram bot started and polling")
