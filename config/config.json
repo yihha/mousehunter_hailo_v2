@@ -45,7 +45,7 @@
             "rodent": 0.15
         },
         "zoom_detection": {
-            "enabled": true,
+            "enabled": false,
             "crop_padding": 0.5,
             "_comment": "Two-stage: crop from 1080p main stream when cat detected without prey"
         },
