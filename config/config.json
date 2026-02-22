@@ -41,8 +41,8 @@
         "reg_max": 8,
         "engine_confidence_threshold": 0.10,
         "thresholds": {
-            "cat": 0.55,
-            "rodent": 0.15
+            "cat": 0.60,
+            "rodent": 0.25
         },
         "zoom_detection": {
             "enabled": false,
